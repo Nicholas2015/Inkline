@@ -28,6 +28,7 @@ CMakeLists.txt.user.*
 /.vs/
 /CMakeUserPresets.json
 /.cache/clangd/
+.kiro
 
 # Python test tooling
 __pycache__/
