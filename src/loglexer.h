@@ -7,13 +7,13 @@ public:
   using QsciLexerCustom::QsciLexerCustom;
   const char *language() const override { return "日志"; }
   QString description(int style) const override {
-    static const QStringList names = {"正文", "时间", "调试", "信息",
-                                      "警告", "错误", "来源", "字段"};
+    static const QStringList names = {"正文", "时间", "调试", "信息", "警告",
+                                      "错误", "来源", "字段", "函数"};
     return names.value(style);
   }
   QColor defaultColor(int style) const override {
-    return style >= 0 && style <= LogStyle::Key ? LogStyle::ink(style)
-                                                : LogStyle::ink(0);
+    return style >= 0 && style <= LogStyle::Function ? LogStyle::ink(style)
+                                                     : LogStyle::ink(0);
   }
   void styleText(int start, int end) override {
     if (!editor() || end <= start)

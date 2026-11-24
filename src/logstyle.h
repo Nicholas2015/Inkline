@@ -4,12 +4,31 @@
 #include <array>
 
 namespace LogStyle {
-enum Token { Text, Time, Debug, Info, Warn, Error, Source, Key };
+enum Token { Text, Time, Debug, Info, Warn, Error, Source, Key, Function };
 inline QColor ink(int token) {
-  static const std::array<QColor, 8> colors = {"#292e31", "#596975", "#6d5180",
-                                               "#226662", "#895307", "#ac363b",
-                                               "#375b78", "#536476"};
+  static const std::array<QColor, 9> colors = {"#292e31", "#536571", "#542194",
+                                               "#005640", "#703c00", "#91162f",
+                                               "#285e89", "#536476", "#064caa"};
   return colors.at(token);
+}
+inline QColor levelBackground(int token) {
+  switch (token) {
+  case Debug:
+    return QColor("#e6d4ff");
+  case Info:
+    return QColor("#bee9d8");
+  case Warn:
+    return QColor("#ffdc88");
+  case Error:
+    return QColor("#ffbdc7");
+  default:
+    return {};
+  }
+}
+inline QFont::Weight weight(int token) {
+  if (token >= Debug && token <= Error)
+    return QFont::Bold;
+  return token == Function ? QFont::DemiBold : QFont::Normal;
 }
 // Match structured fields rather than tinting the entire record.
 template <typename Visitor> void tokens(const QString &s, Visitor visit) {
@@ -27,9 +46,15 @@ template <typename Visitor> void tokens(const QString &s, Visitor visit) {
              : (level == "INFO" || level == "NOTICE") ? Info
              : level.startsWith("WARN")               ? Warn
                                                       : Error;
-    } else if (m.capturedStart(3) >= 0)
-      kind = Source;
-    else if (m.capturedStart(4) >= 0)
+    } else if (m.capturedStart(3) >= 0) {
+      const auto source = m.capturedView(3);
+      const auto left = source.indexOf(':') + 1;
+      const auto right = source.lastIndexOf(':');
+      visit(m.capturedStart(), left, Source);
+      visit(m.capturedStart() + left, right - left, Function);
+      visit(m.capturedStart() + right, source.size() - right, Source);
+      continue;
+    } else if (m.capturedStart(4) >= 0)
       kind = Key;
     visit(m.capturedStart(), m.capturedLength(), kind);
   }
@@ -49,8 +74,10 @@ public:
     tokens(s, [this](int pos, int n, int kind) {
       QTextCharFormat f;
       f.setForeground(ink(kind));
-      if (kind >= Info && kind <= Error)
-        f.setFontWeight(QFont::DemiBold);
+      const auto paper = levelBackground(kind);
+      if (paper.isValid())
+        f.setBackground(paper);
+      f.setFontWeight(weight(kind));
       setFormat(pos, n, f);
     });
     for (qsizetype i = 0; i < words.size(); ++i) {

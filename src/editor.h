@@ -185,16 +185,21 @@ public:
     else
       setFont(font);
     if (auto *log = dynamic_cast<LogLexer *>(style)) {
-      QFont strong = font;
-      strong.setWeight(QFont::DemiBold);
-      for (int level : {LogStyle::Info, LogStyle::Warn, LogStyle::Error})
-        log->setFont(strong, level);
+      for (int token = LogStyle::Text; token <= LogStyle::Function; ++token) {
+        const auto paper = LogStyle::levelBackground(token);
+        if (paper.isValid()) log->setPaper(paper, token);
+        auto face = font;
+        face.setWeight(LogStyle::weight(token));
+        log->setFont(face, token);
+      }
     }
     setMarginsFont(font);
     layoutColumns();
     setMarginsBackgroundColor(QColor("#f5f6f5"));
     setMarginsForegroundColor(QColor("#687174"));
-    setCaretLineBackgroundColor(QColor("#f4f6f6"));
+    const bool logView = dynamic_cast<LogLexer *>(style) != nullptr;
+    setCaretLineBackgroundColor(QColor(logView ? "#77888e" : "#f4f6f6"));
+    SendScintilla(SCI_SETCARETLINEBACKALPHA, logView ? 16 : SC_ALPHA_NOALPHA);
     setCaretLineVisible(true);
     setSelectionBackgroundColor(QColor("#d6e2e7"));
     setSelectionForegroundColor(QColor("#1f2c33"));
