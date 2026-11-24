@@ -20,7 +20,7 @@
 
 ## 构建
 
-Windows 使用同一个 MSYS2 UCRT64 前缀的 GCC、Qt 6 Base、Qt 6 5Compat 和 qscintilla-qt6，并安装 CMake 和 Ninja。将前缀的 bin 加入 PATH。从项目根目录运行：
+Windows 使用同一个 MSYS2 UCRT64 前缀的 GCC、Qt 6 Base、Qt 6 5Compat 和 qscintilla-qt6，并安装 CMake、Ninja 和 Python 3（用于测试）。将前缀的 bin 加入 PATH。从项目根目录运行：
 
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:/msys64/ucrt64
@@ -40,4 +40,11 @@ ctest --test-dir build --output-on-failure
 "$(brew --prefix qtbase)/bin/macdeployqt" build/Inkline.app
 ```
 
-源码按文档、编辑命令、搜索、日志、语言服务和 AI 分模块组织。Windows 对比数据见 BENCHMARK.md。macOS 自动构建和验证流程在 .github/workflows/macos.yml。
+### 工程结构
+
+- `src/main.cpp` 负责启动与命令行分发，`src/app/` 管理主窗口、文件、会话和安装自检。
+- `inkcore` 处理文档、编码、配置解析及日志文件读取，`inklog` 提供日志显示与扫描，`inkcode` 集成 AI 与语言服务。
+- `third_party/` 保存随源码分发的解析器及许可证。Qt 和 QScintilla 使用系统 SDK。
+- `tests/` 通过 CTest 统一运行 C++ 回归和 Python 后台进程测试。仅构建发布程序可在配置时添加 `-DBUILD_TESTING=OFF`，无需 Python 或 Qt Test。
+
+Windows 对比数据见 BENCHMARK.md。Windows 与 macOS 的构建、测试、打包和安装自检分别由 `.github/workflows/windows.yml` 和 `.github/workflows/macos.yml` 执行。

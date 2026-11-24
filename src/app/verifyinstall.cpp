@@ -1,9 +1,13 @@
-#pragma once
+#include "verifyinstall.h"
+#include "mainwindow.h"
+#include "editcommands.h"
+#include "workspacefiles.h"
+#include <QTemporaryDir>
 #include <QSslSocket>
 #include <QElapsedTimer>
 // Runs the deployed executable against disposable settings and real editor
 // widgets.
-static int verifyInstall(const QString &output) {
+int verifyInstall(const QString &output) {
   QTemporaryDir temp;
   QJsonObject result;
   auto require = [&](bool condition, const QString &name) {

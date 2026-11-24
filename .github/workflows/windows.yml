@@ -1,0 +1,40 @@
+name: Windows native package
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-qt6-base
+            mingw-w64-ucrt-x86_64-qt6-5compat
+            mingw-w64-ucrt-x86_64-qscintilla-qt6
+      - name: Build and test
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$MINGW_PREFIX"
+          cmake --build build --parallel 2
+          ctest --test-dir build --output-on-failure
+          echo "INKLINE_QT_PREFIX=$(cygpath -am "$MINGW_PREFIX")" >> "$GITHUB_ENV"
+      - name: Package and verify
+        shell: pwsh
+        run: |
+          ./packaging/windows.ps1 -QtPrefix $env:INKLINE_QT_PREFIX
+          $report = Join-Path $env:RUNNER_TEMP 'inkline-install.json'
+          $app = Start-Process -FilePath ./dist/Inkline/Inkline.exe -ArgumentList "--verify-install `"$report`"" -Wait -PassThru -WindowStyle Hidden
+          if ($app.ExitCode -ne 0) { throw "Install check failed ($($app.ExitCode))" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Inkline-Windows
+          path: dist/Inkline/

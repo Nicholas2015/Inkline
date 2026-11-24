@@ -11,8 +11,6 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qtbase);$(brew --prefix qt5compat);$(brew --prefix qscintilla2)"
           cmake --build build --parallel
           ctest --test-dir build --output-on-failure
-          python3 tests/logworker.py build/Inkline.app/Contents/MacOS/Inkline
-          python3 tests/search_worker.py build/Inkline.app/Contents/MacOS/Inkline
       - name: Package and verify
         run: |
           "$(brew --prefix qtbase)/bin/macdeployqt" build/Inkline.app -always-overwrite

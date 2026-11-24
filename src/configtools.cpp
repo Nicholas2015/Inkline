@@ -149,7 +149,7 @@ public:
 Result tomlDocument(const QString &s, bool pretty) {
   const auto utf8 = s.toUtf8();
   try {
-    toml::parse(std::string_view(utf8.constData(), size_t(utf8.size())));
+    (void)toml::parse(std::string_view(utf8.constData(), size_t(utf8.size())));
   } catch (const toml::parse_error &e) {
     const auto pos = e.source().begin;
     return {{}, QString::fromUtf8(e.description().data(), qsizetype(e.description().size())), int(pos.line), int(pos.column)};
