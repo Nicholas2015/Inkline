@@ -13,15 +13,10 @@ void installLanguageTools(QMainWindow *, QTabWidget *,
                           std::function<void(QString)>);
 
 namespace {
-QString endpoint() { return QSettings().value("ai/endpoint").toString(); }
-QString model() { return QSettings().value("ai/model").toString(); }
-bool validUrl(const QUrl &url) {
-  const bool local =
-      url.host() == "localhost" || QHostAddress(url.host()).isLoopback();
-  return url.isValid() && !url.host().isEmpty() && url.userInfo().isEmpty() &&
-         !url.hasFragment() && !url.hasQuery() && url.path().size() > 1 &&
-         (url.scheme() == "https" || (url.scheme() == "http" && local));
-}
+using Ai::endpoint;
+using Ai::model;
+using Ai::ModelClient;
+
 QString contextBefore(Editor *e, int limit) {
   long pos = e->SendScintilla(Editor::SCI_GETCURRENTPOS);
   long start = qMax(0L, pos - 4L * limit);
@@ -37,76 +32,6 @@ void replace(Editor *e, QString value) {
     value.replace('\n', '\r');
   e->SendScintilla(Editor::SCI_REPLACESEL, value.toUtf8().constData());
 }
-
-class ModelClient : public QObject {
-public:
-  using Callback = std::function<void(QString, QString)>;
-  using QObject::QObject;
-  QHash<QPair<QString, QString>, QString> keys;
-  QNetworkAccessManager net;
-  QNetworkReply *ask(QObject *owner, const QString &instruction,
-                     const QString &context, Callback done) {
-    QNetworkRequest req{QUrl(endpoint())};
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                     QNetworkRequest::ManualRedirectPolicy);
-    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    const auto token = keys.value({QSettings().value("ai/provider").toString(), endpoint()});
-    if (!token.isEmpty())
-      req.setRawHeader("Authorization",
-                       "Bearer " + token.toUtf8());
-    req.setTransferTimeout(60000);
-    QJsonArray messages{
-        QJsonObject{{"role", "system"},
-                    {"content", "Return only the requested code or JSON "
-                                "without Markdown fences."}},
-        QJsonObject{{"role", "user"},
-                    {"content", instruction + "\n\n" + context}}};
-    auto reply = net.post(
-        req,
-        QJsonDocument(QJsonObject{{"model", model()}, {"messages", messages}})
-            .toJson());
-    auto buffer = std::make_shared<QByteArray>();
-    reply->setReadBufferSize(1024 * 1024 + 1);
-    connect(owner, &QObject::destroyed, reply, [reply, owner] {
-      QObject::disconnect(reply, nullptr, owner, nullptr);
-      if (reply->isRunning())
-        reply->abort();
-    });
-    connect(reply, &QIODevice::readyRead, reply, [reply, buffer] {
-      buffer->append(reply->readAll());
-      if (buffer->size() > 1024 * 1024)
-        reply->abort();
-    });
-    connect(reply, &QNetworkReply::finished, reply, &QObject::deleteLater);
-    connect(reply, &QNetworkReply::finished, owner, [done, reply, buffer] {
-      buffer->append(reply->readAll());
-      auto code =
-          reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-      if (buffer->size() > 1024 * 1024)
-        return done({}, "模型响应超过 1 MiB");
-      if (reply->error() != QNetworkReply::NoError || code < 200 || code >= 300)
-        return done({}, QString("请求失败（HTTP %1）%2")
-                            .arg(code)
-                            .arg(reply->errorString()));
-      auto choices =
-          QJsonDocument::fromJson(*buffer).object()["choices"].toArray();
-      QString answer = choices.isEmpty() ? QString{}
-                                         : choices.first()
-                                               .toObject()["message"]
-                                               .toObject()["content"]
-                                               .toString();
-      QRegularExpression fence(
-          R"(^\s*[\x60]{3}[^\n]*\n([\s\S]*?)\r?\n[\x60]{3}\s*$)");
-      auto match = fence.match(answer);
-      if (match.hasMatch())
-        answer = match.captured(1);
-      if (answer.trimmed().isEmpty() || answer.contains(QChar::Null))
-        return done({}, "服务没有返回有效文本");
-      done(answer, {});
-    });
-    return reply;
-  }
-};
 
 class Inline : public QObject {
   Editor *e;
@@ -286,7 +211,7 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
                         : e->hasSelectedText()
                             ? "改进以下选中的代码。"
                             : "根据上下文续写光标后的代码。");
-  ModelProviders providers(endpoint(), model(), client->keys, validUrl);
+  ModelProviders providers(client->credentials);
   auto form = new QFormLayout(&config);
   form->addRow(&providers);
   form->setContentsMargins(16, 16, 16, 16);
@@ -392,22 +317,12 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
   });
   QObject::connect(e, &QObject::destroyed, &d, &QDialog::reject);
   auto saveModel = [&] {
-    auto url = providers.chatUrl();
-    if (!validUrl(QUrl(url, QUrl::StrictMode)) ||
-        providers.selectedModel().isEmpty()) {
+    auto error = providers.save();
+    if (!error.isEmpty()) {
       pages.setCurrentWidget(&config);
-      notice.setText("请填写完整 HTTPS 接口路径（本机可用 HTTP）及模型名称。");
+      notice.setText(error);
       return false;
     }
-    if (!providers.validKey()) {
-      pages.setCurrentWidget(&config);
-      notice.setText("API Key 含无效字符。");
-      return false;
-    }
-    QSettings settings;
-    providers.save(settings);
-    settings.setValue("ai/endpoint", url);
-    settings.setValue("ai/model", providers.selectedModel());
     return true;
   };
   auto *saveSettings = new QPushButton("保存模型设置");
@@ -497,7 +412,7 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
 }
 } // namespace
 
-void installCodeTools(QMainWindow *window, QTabWidget *tabs,
+QAction *installCodeTools(QMainWindow *window, QTabWidget *tabs,
                       std::function<void(QString)> openFile) {
   installLanguageTools(window, tabs, std::move(openFile));
   auto client = new ModelClient(window);
@@ -528,7 +443,7 @@ void installCodeTools(QMainWindow *window, QTabWidget *tabs,
   attach();
   QObject::connect(toggle, &QAction::triggered, menu, [=](bool enable) {
     if (enable) {
-      if (!validUrl(QUrl(endpoint())) || model().isEmpty()) {
+      if (!Ai::validEndpoint(endpoint()) || model().isEmpty()) {
         QMessageBox::information(window, "AI 灰字补全", "请先在 AI 代码建议的“模型设置”页保存接口与模型名称。");
         toggle->setChecked(false);
         return;
@@ -553,4 +468,5 @@ void installCodeTools(QMainWindow *window, QTabWidget *tabs,
       a->setEnabled(e && !e->isReadOnly());
     toggle->setChecked(!endpoint().isEmpty() && QSettings().value("ai/inlineEndpoint").toString() == endpoint());
   });
+  return composeAction;
 }

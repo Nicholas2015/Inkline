@@ -1,9 +1,13 @@
 #include <QCryptographicHash>
 #include "mainwindow.h"
 #include "editcommands.h"
+#include "editor.h"
+#include "logview.h"
 #include "appearance.h"
 #include "workspacefiles.h"
 #include <QScrollBar>
+#include <QSplitter>
+#include <QSettings>
 
 void Window::revealActiveFile() {
   const QString file = pathOf(tabs->currentWidget());

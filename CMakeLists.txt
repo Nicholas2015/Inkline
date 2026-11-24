@@ -21,14 +21,23 @@ target_include_directories(inkcore PRIVATE third_party/tomlplusplus)
 target_link_libraries(inkcore PRIVATE inkconfigyaml)
 target_include_directories(inkcore PUBLIC src)
 target_link_libraries(inkcore PUBLIC Qt6::Core Qt6::Core5Compat)
+add_library(inksearchtask STATIC src/searchtask.cpp)
+target_include_directories(inksearchtask PUBLIC src)
+target_link_libraries(inksearchtask PUBLIC Qt6::Core)
+
+add_library(inkprovider STATIC src/providerservice.cpp)
+target_include_directories(inkprovider PUBLIC src)
+target_link_libraries(inkprovider PUBLIC Qt6::Network)
+
 add_library(inkcode src/codetools.cpp src/languagetools.cpp)
 target_include_directories(inkcode PUBLIC src)
-target_link_libraries(inkcode PUBLIC Qt6::Concurrent Qt6::Widgets Qt6::Network QScintilla::Qt6)
+target_link_libraries(inkcode PUBLIC Qt6::Concurrent Qt6::Widgets Qt6::Network QScintilla::Qt6 PRIVATE inkprovider)
 add_library(inklog STATIC src/logview.cpp src/logscan.cpp)
 target_link_libraries(inklog PUBLIC inkcore Qt6::Widgets Qt6::Concurrent)
-qt_add_executable(Inkline src/main.cpp src/app/mainwindow.cpp src/app/windowfiles.cpp src/app/windowsession.cpp
+qt_add_executable(Inkline src/main.cpp src/app/mainwindow.cpp src/app/windowmenus.cpp
+  src/editcommands.cpp src/viewcommands.cpp src/app/windowfiles.cpp src/app/windowsession.cpp
   src/app/verifyinstall.cpp src/searchtools.cpp src/searchworker.cpp resources/icons.qrc)
-target_link_libraries(Inkline PRIVATE inkcode inklog)
+target_link_libraries(Inkline PRIVATE inkcode inklog inksearchtask)
 set_target_properties(Inkline PROPERTIES WIN32_EXECUTABLE TRUE MACOSX_BUNDLE TRUE MACOSX_BUNDLE_GUI_IDENTIFIER org.inkedit.native MACOSX_BUNDLE_ICON_FILE Inkline.icns)
 if(WIN32)
  enable_language(RC)

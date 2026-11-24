@@ -47,4 +47,11 @@ ctest --test-dir build --output-on-failure
 - `third_party/` 保存随源码分发的解析器及许可证。Qt 和 QScintilla 使用系统 SDK。
 - `tests/` 通过 CTest 统一运行 C++ 回归和 Python 后台进程测试。仅构建发布程序可在配置时添加 `-DBUILD_TESTING=OFF`，无需 Python 或 Qt Test。
 
+搜索任务和模型供应商可单独构建、测试。测试进程使用 Qt Core 的事件循环，不启动主窗口。完成 CMake 配置后运行：
+
+```sh
+cmake --build build --target inksearchtaskcheck inkprovidercheck
+ctest --test-dir build -L services --output-on-failure
+```
+
 Windows 对比数据见 BENCHMARK.md。Windows 与 macOS 的构建、测试、打包和安装自检分别由 `.github/workflows/windows.yml` 和 `.github/workflows/macos.yml` 执行。

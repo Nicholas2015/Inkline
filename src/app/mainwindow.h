@@ -26,6 +26,11 @@ protected:
   void closeEvent(QCloseEvent *ev) override;
 
 private:
+  void installMenusAndToolbar();
+  void installFileMenu(QToolBar *bar);
+  QAction *installEditorMenu();
+  void processConfiguration(bool pretty);
+  void setupWorkspace();
   void revealActiveFile();
   void workspacePathMoved(const QString &from, const QString &to);
   void setWorkspaceFolder(const QString &path);

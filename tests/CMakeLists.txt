@@ -1,3 +1,12 @@
+add_executable(inksearchtaskcheck searchtask.cpp)
+target_link_libraries(inksearchtaskcheck PRIVATE inksearchtask)
+add_test(NAME search_task COMMAND inksearchtaskcheck)
+
+add_executable(inkprovidercheck providerservice.cpp)
+target_link_libraries(inkprovidercheck PRIVATE inkprovider)
+add_test(NAME provider_service COMMAND inkprovidercheck)
+set_tests_properties(search_task provider_service PROPERTIES LABELS services TIMEOUT 45)
+
 add_executable(inkconfigcheck configcheck.cpp)
 target_link_libraries(inkconfigcheck PRIVATE inkcore)
 add_test(NAME config_tools COMMAND inkconfigcheck)

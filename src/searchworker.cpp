@@ -1,6 +1,7 @@
 #include "document.h"
 #include "logscan.h"
 #include "searchtools.h"
+#include "searchtask.h"
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -30,9 +31,9 @@ struct Pages {
   qint64 count = 0;
   explicit Pages(const QDir &d) : dir(d) {}
   void add(const QJsonArray &row) {
-    if (count % 512 == 0) {
+    if (count % SearchPageSize == 0) {
       file.close();
-      file.setFileName(dir.filePath(QString::number(count / 512) + ".jsonl"));
+      file.setFileName(dir.filePath(QString::number(count / SearchPageSize) + ".jsonl"));
       if (!file.open(QIODevice::WriteOnly))
         fail(file.errorString());
     }

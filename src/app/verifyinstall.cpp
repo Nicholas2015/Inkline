@@ -1,7 +1,11 @@
 #include "verifyinstall.h"
 #include "mainwindow.h"
 #include "editcommands.h"
+#include "editor.h"
+#include "logview.h"
 #include "workspacefiles.h"
+#include <QSettings>
+#include <QToolBar>
 #include <QTemporaryDir>
 #include <QSslSocket>
 #include <QElapsedTimer>
@@ -47,6 +51,9 @@ int verifyInstall(const QString &output) {
       QJsonObject tab{{"path",""},{"dirty",true},{"codec","UTF-8"},{"draftId",draftId}};
       put(snapshot,QJsonDocument(QJsonObject{{"project",temp.path()},{"version",1},{"active",0},{"tabs",QJsonArray{tab}}}).toJson());
       Window restored;
+      auto *toolbar = restored.findChild<QToolBar *>();
+      require(toolbar && toolbar->actions().contains(action(restored, "查找…")) &&
+              toolbar->actions().contains(action(restored, "AI 代码建议…")), "sharedToolbarActions");
       restored.startSession(legacyDir);
       auto *tabs=restored.findChild<QTabWidget*>();
       auto *editor=tabs?dynamic_cast<Edit*>(tabs->currentWidget()):nullptr;
@@ -201,6 +208,29 @@ int verifyInstall(const QString &output) {
               "splitViewsShareEdits");
       right->undo();
       require(e->text() == Document::open(code).text && left->text() == right->text(), "splitSharedUndo");
+      auto *toggle = action(w, "切换本行书签");
+      auto *nextMark = action(w, "下个书签");
+      auto *previousMark = action(w, "上个书签");
+      auto *sortLines = action(w, "行排序");
+      require(toggle && toggle->shortcut() == QKeySequence("Ctrl+F2") &&
+              nextMark && nextMark->shortcut() == QKeySequence("F2") &&
+              previousMark && previousMark->shortcut() == QKeySequence("Shift+F2") && sortLines,
+              "editorMenuBindings");
+      e->setText("b\na");
+      e->setCursorPosition(1, 0);
+      toggle->trigger();
+      e->setCursorPosition(0, 0);
+      previousMark->trigger();
+      int row, column;
+      e->getCursorPosition(&row, &column);
+      require(row == 1, "previousBookmarkWraps");
+      e->setCursorPosition(0, 0);
+      nextMark->trigger();
+      e->getCursorPosition(&row, &column);
+      require(row == 1, "nextBookmarkActivated");
+      e->selectAll();
+      sortLines->trigger();
+      require(e->text() == "a\nb", "sortLinesMenuAction");
       require(WorkspaceFiles::relocated("/work/api/a.ini", "/work/api", "/work/v2") == "/work/v2/a.ini" &&
               WorkspaceFiles::relocated("/work/api-old/b.ini", "/work/api", "/work/v2") == "/work/api-old/b.ini",
               "workspaceRenameByComponent");

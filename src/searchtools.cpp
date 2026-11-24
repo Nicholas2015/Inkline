@@ -1,10 +1,9 @@
 #include "searchtools.h"
+#include "searchtask.h"
 #include "batchreplaceeditor.h"
 #include "document.h"
 #include <QJsonArray>
-#include <QJsonDocument>
 #include <QJsonObject>
-#include <QProcess>
 #include <QTemporaryDir>
 #include <QToolButton>
 #include <Qsci/qsciscintilla.h>
@@ -13,103 +12,35 @@
 
 namespace {
 using Editor = QsciScintilla;
-using Cache = std::shared_ptr<QTemporaryDir>;
 QString filePath(QWidget *w) {
   return w ? w->property("filePath").toString() : QString();
 }
-bool save(const QString &path, const QByteArray &data) {
-  QFile f(path);
-  return f.open(QIODevice::WriteOnly) && f.write(data) == data.size() &&
-         f.flush();
-}
-class Job : public QObject {
-  QProcess *process = nullptr;
-
-public:
-  explicit Job(QObject *owner) : QObject(owner) {}
-  ~Job() override { cancel(); }
-  void cancel() {
-    if (!process)
-      return;
-    auto *old = process;
-    process = nullptr;
-    old->kill();
-    if (old->state() != QProcess::NotRunning)
-      old->waitForFinished(1000);
-    old->deleteLater();
-  }
-  void run(Cache cache, const QJsonObject &p,
-           std::function<void(QJsonObject)> done) {
-    cancel();
-    const auto request = cache->filePath("request.json");
-    if (!cache->isValid() ||
-        !save(request, QJsonDocument(p).toJson(QJsonDocument::Compact))) {
-      done({{"error", "无法写入临时文件"}});
-      return;
-    }
-    process = new QProcess(this);
-    auto *child = process;
-    connect(child, &QProcess::errorOccurred, this,
-            [=](QProcess::ProcessError error) {
-              if (child != process || error != QProcess::FailedToStart)
-                return;
-              process = nullptr;
-              child->deleteLater();
-              done({{"error", child->errorString()}});
-            });
-    connect(child, &QProcess::finished, this,
-            [=](int code, QProcess::ExitStatus status) {
-              if (child != process)
-                return;
-              process = nullptr;
-              child->deleteLater();
-              QFile f(cache->filePath("reply.json"));
-              if (code || status != QProcess::NormalExit ||
-                  !f.open(QIODevice::ReadOnly)) {
-                done({{"error", "搜索进程退出，请重试。"}});
-                return;
-              }
-              auto answer = QJsonDocument::fromJson(f.readAll()).object();
-              if (answer.isEmpty())
-                answer.insert("error", "搜索结果不完整");
-              done(answer);
-            });
-    child->start(QCoreApplication::applicationFilePath(),
-                 {"--search-worker", request});
-  }
-};
-
 class Results : public QWidget {
   QListWidget *rows = new QListWidget;
   QPushButton *prev = new QPushButton("上一批结果"),
               *next = new QPushButton("下一批结果");
   QLabel *position = new QLabel;
-  Cache cache;
+  SearchCache cache;
   qint64 count = 0, page = 0;
   void showPage(qint64 number) {
     page = number;
     rows->clear();
-    if (cache && count) {
-      QFile f(cache->filePath(QString::number(page) + ".jsonl"));
-      if (f.open(QIODevice::ReadOnly))
-        while (!f.atEnd()) {
-          auto row = QJsonDocument::fromJson(f.readLine()).array();
-          if (row.isEmpty())
-            continue;
-          QString title = row[0].toString();
-          if (row[1].toInteger())
-            title += QString(":%1    %2")
-                         .arg(row[1].toInteger())
-                         .arg(row[4].toString());
-          auto *item = new QListWidgetItem(title, rows);
-          item->setData(Qt::UserRole, row);
-        }
+    const auto pages = searchPageCount(count);
+    if (page < pages) {
+      for (const auto &row : readSearchPage(cache, page)) {
+        QString title = row[0].toString();
+        if (row[1].toInteger())
+          title += QString(":%1    %2")
+                       .arg(row[1].toInteger())
+                       .arg(row[4].toString());
+        auto *item = new QListWidgetItem(title, rows);
+        item->setData(Qt::UserRole, row);
+      }
     }
     prev->setEnabled(page > 0);
-    next->setEnabled((page + 1) * 512 < count);
-    position->setText(
-        count ? QString("第 %1 / %2 页").arg(page + 1).arg((count + 511) / 512)
-              : QString());
+    next->setEnabled(page + 1 < pages);
+    position->setText(pages ? QString("第 %1 / %2 页").arg(page + 1).arg(pages)
+                            : QString());
   }
 
 public:
@@ -135,7 +66,7 @@ public:
                 activate(i->data(Qt::UserRole).toJsonArray());
             });
   }
-  void reset(Cache data = {}, qint64 total = 0) {
+  void reset(SearchCache data = {}, qint64 total = 0) {
     cache = std::move(data);
     count = total;
     showPage(0);
@@ -152,7 +83,7 @@ void select(Editor *e, const QString &text, int left, int right) {
 }
 class Find : public QDialog {
   QTabWidget *tabs;
-  Job job{this};
+  SearchTask job{this};
   QComboBox *field = new QComboBox;
   QLineEdit *replacement = new QLineEdit;
   QCheckBox *mode = new QCheckBox("替换"), *regex = new QCheckBox("正则"),
@@ -335,7 +266,7 @@ public:
       auto value = e->text();
       auto id = snapshots.size();
       auto filename = QString::number(id) + ".txt";
-      if (!save(cache->filePath(filename), value.toUtf8())) {
+      if (!cache->isValid() || !writeSearchFile(cache->filePath(filename), value.toUtf8())) {
         status->setText("无法暂存文档");
         return;
       }
@@ -422,7 +353,7 @@ class Folder : public QDialog {
   bool names;
   std::function<void(QString)> openFile, openLog;
   std::function<void(qint64, QString, int)> jump;
-  Job job{this};
+  SearchTask job{this};
   QLineEdit *root = new QLineEdit, *query = new QLineEdit,
             *glob = new QLineEdit("*");
   QCheckBox *regex = new QCheckBox("正则"),
@@ -599,7 +530,7 @@ public:
 
 class BatchReplace : public QDialog {
   QTabWidget *tabs;
-  Job job{this};
+  SearchTask job{this};
   QLineEdit *root = new QLineEdit, *glob = new QLineEdit("*"),
             *query = new QLineEdit, *value = new QLineEdit;
   QCheckBox *regex = new QCheckBox("正则"), *sensitive = new QCheckBox("区分大小写");
@@ -940,7 +871,7 @@ void compare(QMainWindow *window, QTabWidget *tabs, bool disk) {
   }
 }
 } // namespace
-void installSearchTools(QMainWindow *window, QMenu *menu, QTabWidget *tabs,
+QAction *installSearchTools(QMainWindow *window, QMenu *menu, QTabWidget *tabs,
                         std::function<void(QString)> openFile,
                         std::function<void()> logFind,
                         std::function<void(qint64, QString, int)> jumpToByte,
@@ -955,8 +886,9 @@ void installSearchTools(QMainWindow *window, QMenu *menu, QTabWidget *tabs,
     QObject::connect(action, &QAction::triggered, window, std::move(fn));
     if (editorOnly)
       editorActions.append(action);
+    return action;
   };
-  add("查找…", QKeySequence::Find, [=] {
+  auto *findAction = add("查找…", QKeySequence::Find, [=] {
     if (auto *e = qobject_cast<Editor *>(tabs->currentWidget()))
       find->openFor(e, false);
     else if (logFind)
@@ -989,4 +921,5 @@ void installSearchTools(QMainWindow *window, QMenu *menu, QTabWidget *tabs,
   };
   QObject::connect(tabs, &QTabWidget::currentChanged, window, update);
   update();
+  return findAction;
 }
