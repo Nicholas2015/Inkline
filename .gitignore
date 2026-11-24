@@ -29,6 +29,7 @@ CMakeLists.txt.user.*
 /CMakeUserPresets.json
 /.cache/clangd/
 .kiro
+.cursorrules
 
 # Python test tooling
 __pycache__/
