@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleExecutable</key><string>Inkline</string>
+<key>CFBundleName</key><string>墨行 Inkline</string>
+<key>CFBundleIdentifier</key><string>org.inkedit.native</string>
+<key>CFBundleIconFile</key><string>Inkline.icns</string>
+<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleShortVersionString</key><string>0.2</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>CFBundleDocumentTypes</key><array><dict>
+<key>CFBundleTypeName</key><string>Text document</string>
+<key>CFBundleTypeRole</key><string>Editor</string>
+<key>LSHandlerRank</key><string>Alternate</string>
+<key>LSItemContentTypes</key><array><string>public.text</string><string>public.source-code</string><string>public.json</string></array>
+</dict></array>
+</dict></plist>
