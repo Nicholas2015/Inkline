@@ -1,8 +1,10 @@
 #include "codetools.h"
+#include "modelproviders.h"
 #include <QListWidget>
 #include "appearance.h"
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qscilexer.h>
+#include <Qsci/qscistyle.h>
 #include <QtNetwork>
 #include <QtWidgets>
 
@@ -40,7 +42,7 @@ class ModelClient : public QObject {
 public:
   using Callback = std::function<void(QString, QString)>;
   using QObject::QObject;
-  QHash<QString, QString> keys;
+  QHash<QPair<QString, QString>, QString> keys;
   QNetworkAccessManager net;
   QNetworkReply *ask(QObject *owner, const QString &instruction,
                      const QString &context, Callback done) {
@@ -48,9 +50,10 @@ public:
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::ManualRedirectPolicy);
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    if (!keys.value(endpoint()).isEmpty())
+    const auto token = keys.value({QSettings().value("ai/provider").toString(), endpoint()});
+    if (!token.isEmpty())
       req.setRawHeader("Authorization",
-                       "Bearer " + keys.value(endpoint()).toUtf8());
+                       "Bearer " + token.toUtf8());
     req.setTransferTimeout(60000);
     QJsonArray messages{
         QJsonObject{{"role", "system"},
@@ -111,78 +114,129 @@ class Inline : public QObject {
   QTimer delay;
   QLabel *hint;
   QString suggestion;
+  long anchor = -1;
+  int marker, handle = -1;
+  bool accepting = false;
+  quint64 generation = 0;
+  QPointer<QNetworkReply> pending;
+
   bool eligible() const {
     const auto dest = endpoint();
     return !dest.isEmpty() && QSettings().value("ai/inlineEndpoint").toString() == dest &&
            e->lexer() && QString::fromUtf8(e->lexer()->language()) != "日志" && !e->isReadOnly();
   }
-  quint64 generation = 0;
-  QPointer<QNetworkReply> pending;
   void clear() {
     ++generation;
     delay.stop();
     suggestion.clear();
     hint->hide();
-    if (pending && pending->isRunning())
-      pending->abort();
+    if (handle >= 0) {
+      const int row = e->markerLine(handle);
+      if (row >= 0) e->clearAnnotations(row);
+      e->markerDeleteHandle(handle);
+      handle = -1;
+    }
+    if (pending && pending->isRunning()) pending->abort();
     pending.clear();
+    anchor = -1;
+  }
+  void showSuggestion(QString text, long pos) {
+    if (text.isEmpty()) return;
+    const long row = e->SendScintilla(Editor::SCI_LINEFROMPOSITION, pos);
+    if (text.contains('\n') || pos != e->SendScintilla(Editor::SCI_GETLINEENDPOSITION, row)) {
+      // Virtual annotation rows take up display space without covering source
+      // text, modifying the buffer, or putting anything on the undo stack.
+      if (marker < 0 || e->SendScintilla(Editor::SCI_ANNOTATIONGETTEXT, row) > 0) return;
+      handle = e->markerAdd(row, marker);
+      if (handle < 0) return;
+      QsciStyle gray(244, "Inline completion", QColor("#616b72"), e->lexer()->defaultPaper(),
+                     e->lexer()->defaultFont());
+      e->annotate(row, text, gray);
+    } else {
+      hint->setFont(e->lexer()->defaultFont());
+      hint->setText(text);
+      hint->adjustSize();
+      hint->move(e->SendScintilla(Editor::SCI_POINTXFROMPOSITION, 0UL, pos),
+                 e->SendScintilla(Editor::SCI_POINTYFROMPOSITION, 0UL, pos));
+      hint->show();
+    }
+    suggestion = std::move(text);
+    anchor = pos;
+    e->SendScintilla(Editor::SCI_AUTOCCANCEL);
   }
   void request() {
+    if (!eligible() || !e->hasFocus() || e->hasSelectedText()) return;
     long pos = e->SendScintilla(Editor::SCI_GETCURRENTPOS);
-    long line = e->SendScintilla(Editor::SCI_LINEFROMPOSITION, pos);
-    if (!eligible() || !e->hasFocus() ||
-        e->hasSelectedText() || e->isReadOnly() ||
-        pos != e->SendScintilla(Editor::SCI_GETLINEENDPOSITION, line))
-      return;
-    auto token = generation;
-    pending = client->ask(
-        this, QString("当前语言：%1。只返回光标后需要续写的单行内容，不重复已有前缀。")
-                  .arg(QString::fromUtf8(e->lexer()->language())),
-        contextBefore(e, 4096),
-        [this, token, pos](QString answer, QString err) {
+    const long end = qMin(e->SendScintilla(Editor::SCI_GETLENGTH), pos + 4096L);
+    QByteArray bytes(end - pos + 1, '\0');
+    e->SendScintilla(Editor::SCI_GETTEXTRANGE, pos, end, bytes.data());
+    auto right = QString::fromUtf8(bytes.constData(), end - pos).left(1024);
+    if (!right.isEmpty() && right.back().isHighSurrogate()) right.chop(1);
+    const bool shareRight = QSettings().value("ai/inlineContextEndpoint").toString() == endpoint();
+    const auto suffix = shareRight ? right : QString();
+    auto prefix = contextBefore(e, 4096 - suffix.size());
+    if (!prefix.isEmpty() && prefix.front().isLowSurrogate()) prefix.remove(0, 1);
+    const auto context = QJsonDocument(QJsonObject{{"prefix", prefix}, {"suffix", suffix}})
+                             .toJson(QJsonDocument::Compact);
+    const auto token = generation;
+    pending = client->ask(this,
+        QString("当前语言：%1。只返回应插入 prefix 与 suffix 之间的代码，可以包含多行；不要重复已有内容。")
+            .arg(QString::fromUtf8(e->lexer()->language())), QString::fromUtf8(context),
+        [this, token, pos, right](QString answer, QString err) {
           if (token != generation || !eligible() || !err.isEmpty() || !e->hasFocus() ||
-              pos != e->SendScintilla(Editor::SCI_GETCURRENTPOS))
-            return;
-          suggestion = answer.section('\n', 0, 0).remove('\r');
-          if (suggestion.isEmpty())
-            return;
-          e->SendScintilla(Editor::SCI_AUTOCCANCEL);
-          hint->setFont(e->lexer()->defaultFont());
-          hint->setText(suggestion);
-          hint->adjustSize();
-          hint->move(
-              e->SendScintilla(Editor::SCI_POINTXFROMPOSITION, 0UL, pos),
-              e->SendScintilla(Editor::SCI_POINTYFROMPOSITION, 0UL, pos));
-          hint->show();
+              e->hasSelectedText() || pos != e->SendScintilla(Editor::SCI_GETCURRENTPOS)) return;
+          answer.replace("\r\n", "\n").replace('\r', '\n');
+          QString suffix = right;
+          suffix.replace("\r\n", "\n").replace('\r', '\n');
+          for (auto n = qMin(suffix.size(), answer.size()); n > 0; --n) {
+            if (QStringView(answer).endsWith(QStringView(suffix).left(n))) {
+              answer.chop(n);
+              break;
+            }
+          }
+          showSuggestion(answer, pos);
         });
   }
 
 protected:
   bool eventFilter(QObject *, QEvent *event) override {
-    if (event->type() == QEvent::FocusIn && eligible())
-      delay.start();
-    if (event->type() == QEvent::FocusOut)
+    if (event->type() == QEvent::FocusIn && eligible()) delay.start();
+    if (event->type() == QEvent::FocusOut || event->type() == QEvent::Hide) clear();
+    if (event->type() != QEvent::KeyPress) return false;
+    auto key = static_cast<QKeyEvent *>(event);
+    if (key->key() == Qt::Key_Escape && (!suggestion.isEmpty() || delay.isActive() ||
+                                          (pending && pending->isRunning()))) {
       clear();
-    if (event->type() == QEvent::KeyPress && !suggestion.isEmpty()) {
-      auto key = static_cast<QKeyEvent *>(event);
-      if (key->key() == Qt::Key_Tab && key->modifiers() == Qt::NoModifier) {
-        QString value = suggestion;
-        clear();
-        replace(e, value);
-        return true;
-      }
-      if (key->key() == Qt::Key_Escape) {
-        clear();
-        return true;
-      }
+      return true;
     }
-    return false;
+    if (suggestion.isEmpty()) return false;
+    bool word = key->key() == Qt::Key_Right && key->modifiers() == Qt::AltModifier;
+    bool all = key->key() == Qt::Key_Tab && key->modifiers() == Qt::NoModifier;
+    if (!word && !all) return false;
+    if (!eligible() || e->hasSelectedText() || anchor != e->SendScintilla(Editor::SCI_GETCURRENTPOS)) {
+      clear();
+      return false;
+    }
+    auto length = suggestion.size();
+    if (word) {
+      static const QRegularExpression nextWord(QStringLiteral(R"(^\s*(?:[\p{L}\p{M}\p{N}_]+|\S))"),
+                                              QRegularExpression::UseUnicodePropertiesOption);
+      auto match = nextWord.match(suggestion);
+      if (match.hasMatch()) length = match.capturedLength();
+    }
+    const auto value = suggestion.left(length);
+    const auto rest = suggestion.mid(length);
+    QScopedValueRollback<bool> guard(accepting, true);
+    clear();
+    replace(e, value);
+    showSuggestion(rest, e->SendScintilla(Editor::SCI_GETCURRENTPOS));
+    return true;
   }
 
 public:
   Inline(Editor *editor, ModelClient *models)
-      : QObject(editor), e(editor), client(models),
-        hint(new QLabel(editor->viewport())) {
+      : QObject(editor), e(editor), client(models), hint(new QLabel(editor->viewport())),
+        marker(editor->markerDefine(Editor::Invisible)) {
     hint->setTextFormat(Qt::PlainText);
     hint->setStyleSheet("color:#616b72;background:transparent;");
     hint->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -191,22 +245,19 @@ public:
     delay.setSingleShot(true);
     delay.setInterval(650);
     connect(&delay, &QTimer::timeout, this, [this] { request(); });
-    auto changed = [this] {
-      clear();
-      if (eligible())
-        delay.start();
-    };
-    connect(e, &Editor::textChanged, this, changed);
-    connect(e, &Editor::cursorPositionChanged, this, changed);
-    connect(e->verticalScrollBar(), &QScrollBar::valueChanged, this,
-            [this] { clear(); });
-    connect(e->horizontalScrollBar(), &QScrollBar::valueChanged, this,
-            [this] { clear(); });
+    connect(e, &Editor::textChanged, this, [this] { if (!accepting) refresh(); });
+    connect(e, &Editor::cursorPositionChanged, this, [this] {
+      if (!accepting && (anchor != e->SendScintilla(Editor::SCI_GETCURRENTPOS) || e->hasSelectedText()))
+        refresh();
+    });
+    connect(e, &Editor::selectionChanged, this, [this] { if (e->hasSelectedText()) clear(); });
+    connect(e->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { if (!accepting) clear(); });
+    connect(e->horizontalScrollBar(), &QScrollBar::valueChanged, this, [this] { if (!accepting) clear(); });
     e->installEventFilter(this);
   }
   void refresh() {
     clear();
-    if (eligible()) delay.start();
+    if (eligible() && e->hasFocus()) delay.start();
   }
 };
 
@@ -235,17 +286,9 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
                         : e->hasSelectedText()
                             ? "改进以下选中的代码。"
                             : "根据上下文续写光标后的代码。");
-  QLineEdit address(endpoint()), engine(model()),
-      key(client->keys.value(endpoint()));
-  address.setPlaceholderText("https://example.com/v1/chat/completions");
-  key.setEchoMode(QLineEdit::Password);
-  QObject::connect(&address, &QLineEdit::textChanged, &d, [&] {
-    key.setText(client->keys.value(address.text().trimmed()));
-  });
+  ModelProviders providers(endpoint(), model(), client->keys, validUrl);
   auto form = new QFormLayout(&config);
-  form->addRow("接口地址", &address);
-  form->addRow("模型名称", &engine);
-  form->addRow("API Key（仅本次运行）", &key);
+  form->addRow(&providers);
   form->setContentsMargins(16, 16, 16, 16);
   form->setVerticalSpacing(12);
   form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -349,22 +392,22 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
   });
   QObject::connect(e, &QObject::destroyed, &d, &QDialog::reject);
   auto saveModel = [&] {
-    auto url = address.text().trimmed();
+    auto url = providers.chatUrl();
     if (!validUrl(QUrl(url, QUrl::StrictMode)) ||
-        engine.text().trimmed().isEmpty()) {
+        providers.selectedModel().isEmpty()) {
       pages.setCurrentWidget(&config);
       notice.setText("请填写完整 HTTPS 接口路径（本机可用 HTTP）及模型名称。");
       return false;
     }
-    if (key.text().trimmed().contains(QRegularExpression("[^!-~]"))) {
+    if (!providers.validKey()) {
       pages.setCurrentWidget(&config);
       notice.setText("API Key 含无效字符。");
       return false;
     }
     QSettings settings;
+    providers.save(settings);
     settings.setValue("ai/endpoint", url);
-    settings.setValue("ai/model", engine.text().trimmed());
-    client->keys[url] = key.text().trimmed();
+    settings.setValue("ai/model", providers.selectedModel());
     return true;
   };
   auto *saveSettings = new QPushButton("保存模型设置");
@@ -464,6 +507,7 @@ void installCodeTools(QMainWindow *window, QTabWidget *tabs,
   auto next = menu->addAction("建议下一处修改…");
   auto toggle = menu->addAction("输入时显示 AI 灰字补全");
   toggle->setCheckable(true);
+  toggle->setToolTip("Tab 接受全部，Alt+Right 接受下一个词，Esc 忽略");
   auto controllers = std::make_shared<QHash<Editor *, Inline *>>();
   auto editor = [tabs] {
     return qobject_cast<Editor *>(tabs->currentWidget());
@@ -490,14 +534,15 @@ void installCodeTools(QMainWindow *window, QTabWidget *tabs,
         return;
       }
       if (QMessageBox::question(window, "启用 AI 灰字补全？",
-          "在代码或配置文件中暂停输入后，将自动发送光标前最多 4096 个字符到 " +
-          endpoint() + "。设置适用于之后打开的代码标签。Tab 接受，Esc 忽略。",
+          "在代码或配置文件中暂停输入后，将自动发送光标前后合计最多 4096 个字符到 " +
+          endpoint() + "。设置适用于之后打开的代码标签。Tab 接受全部，Alt+Right 接受下一个词，Esc 忽略。",
           QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
         toggle->setChecked(false);
         return;
       }
     }
     QSettings().setValue("ai/inlineEndpoint", enable ? endpoint() : QString());
+    QSettings().setValue("ai/inlineContextEndpoint", enable ? endpoint() : QString());
     attach();
     if (auto *e = editor()) e->setFocus();
     for (auto *controller : *controllers) controller->refresh();

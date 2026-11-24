@@ -8,12 +8,14 @@ public:
   explicit Log(const QString &file);
   ~Log() override;
   QString filePath() const;
+  void relocateFile(const QString &absolute);
   QJsonObject saveView() const;
   void restoreView(const QJsonObject &state);
   void showSearch();
   void setHighlightWords(const QStringList &words);
   void jumpDialog();
   void gotoLine(qint64 line);
+  void gotoTimestamp(const QString &timestamp);
   void gotoSearchHit(qint64 offset, const QString &codec, int matchLength);
   void gotoByte(qint64 offset, const QString &codec = {});
 

@@ -35,6 +35,11 @@ while($queue.Count) {
     }
 }
 @('[Paths]','Plugins=.') | Set-Content -Encoding ascii (Join-Path $Destination 'qt.conf')
+foreach ($pkg in 'libyaml','tomlplusplus') {
+    $dest = Join-Path $Destination "licenses/$pkg"
+    New-Item -ItemType Directory -Force $dest | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "../third_party/$pkg/LICENSE") -Destination $dest -Force
+}
 $licenses=Join-Path $QtPrefix 'share/licenses'
 foreach($pkg in 'qt6-base','qt6-5compat','qscintilla-qt6','gcc','libgcc','libstdc++','libb2','libwinpthread','md4c','icu','double-conversion','pcre2','zstd','zlib','libpng','freetype','harfbuzz','glib2','graphite2','brotli','bzip2','libiconv','libffi','gettext-runtime','libmd4c','winpthreads'){
     $source=Join-Path $licenses $pkg

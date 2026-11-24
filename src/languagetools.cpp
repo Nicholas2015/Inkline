@@ -10,11 +10,53 @@ using Editor = QsciScintilla;
 using Obj = QJsonObject;
 using Arr = QJsonArray;
 using Reply = std::function<void(QJsonValue)>;
+QString languageId(Editor *e) {
+  if (!e || !e->lexer()) return {};
+  const auto name = QByteArray(e->lexer()->language()).toLower();
+  if (name == "c++") return "cpp";
+  if (name == "python" || name == "go" || name == "rust" || name == "java" || name == "c")
+    return QString::fromLatin1(name);
+  return {};
+}
+QString family(QString id) { return id == "c" ? QStringLiteral("cpp") : id; }
+QStringList providers(const QString &id) {
+  if (id == "python") return {"pylsp", "pyright-langserver", "basedpyright-langserver"};
+  if (id == "go") return {"gopls"};
+  if (id == "java") return {"jdtls"};
+  if (id == "rust") return {"rust-analyzer"};
+  if (id == "cpp") return {"clangd"};
+  return {};
+}
 QString pathOf(Editor *e) {
   auto path = e->property("filePath").toString();
   if (path.isEmpty())
-    path = QString(".inkline-untitled-%1.py").arg(quintptr(e), 0, 16);
+    path = QString(".inkline-untitled-%1.%2").arg(quintptr(e), 0, 16)
+               .arg(languageId(e) == "python" ? "py" : languageId(e) == "rust" ? "rs" : languageId(e));
   return QFileInfo(path).absoluteFilePath();
+}
+QString workspace(QMainWindow *win, Editor *e) {
+  const auto project = win->property("projectRoot").toString();
+  auto dir = QFileInfo(pathOf(e)).absoluteDir();
+  if (!project.isEmpty()) {
+    const auto rel = QDir(project).relativeFilePath(pathOf(e));
+    if (e->property("filePath").toString().isEmpty() ||
+        (!rel.startsWith("../") && !QDir::isAbsolutePath(rel)))
+      return QDir(project).absolutePath();
+  }
+  const QString fallback = dir.absolutePath();
+  QStringList markers;
+  const auto id = family(languageId(e));
+  if (id == "rust") markers << "Cargo.toml";
+  if (id == "go") markers << "go.work" << "go.mod";
+  if (id == "java") markers << "pom.xml" << "settings.gradle" << "settings.gradle.kts" << "build.gradle" << "build.gradle.kts";
+  if (id == "cpp") markers << "compile_commands.json" << "CMakeLists.txt";
+  if (id == "python") markers << "pyproject.toml" << "setup.py";
+  markers << ".git";
+  do {
+    for (const auto &marker : markers)
+      if (dir.exists(marker)) return dir.absolutePath();
+  } while (dir.cdUp());
+  return fallback;
 }
 QString uriOf(Editor *e) {
   return QUrl::fromLocalFile(pathOf(e)).toString(QUrl::FullyEncoded);
@@ -40,6 +82,8 @@ class Language : public QObject {
   QMainWindow *win;
   QTabWidget *tabs;
   std::function<void(QString)> open;
+  QString serverFamily, root;
+  std::unique_ptr<QTemporaryDir> javaData;
   QProcess process;
   QTimer debounce;
   QByteArray input;
@@ -68,7 +112,7 @@ class Language : public QObject {
     int id = ++seq;
     requests[id] = std::move(callback);
     send({{"id", id}, {"method", method}, {"params", params}});
-    QTimer::singleShot(15000, this, [this, id] {
+    QTimer::singleShot(method == "initialize" ? 90000 : 15000, this, [this, id] {
       if (requests.contains(id))
         requests.take(id)(QJsonValue(QJsonValue::Undefined));
     });
@@ -131,6 +175,10 @@ class Language : public QObject {
             values.append(Obj{});
           }
           send({{"id", id}, {"result", values}});
+        } else if (method == "workspace/workspaceFolders") {
+          send({{"id", id}, {"result", Arr{Obj{
+              {"uri", QUrl::fromLocalFile(root).toString(QUrl::FullyEncoded)},
+              {"name", QFileInfo(root).fileName()}}}}});
         } else
           send({{"id", id}, {"result", QJsonValue::Null}});
       }
@@ -141,7 +189,8 @@ class Language : public QObject {
       return;
     QSet<QString> active;
     for (int i = 0; i < tabs->count(); ++i)
-      if (auto e = pythonTab(tabs->widget(i))) {
+      if (auto e = qobject_cast<Editor *>(tabs->widget(i));
+          e && family(languageId(e)) == serverFamily && workspace(win, e) == root) {
         auto uri = uriOf(e);
         active.insert(uri);
         if (!observed.contains(e)) {
@@ -159,7 +208,7 @@ class Language : public QObject {
           versions[uri] = 1;
           notify("textDocument/didOpen",
                  {{"textDocument", Obj{{"uri", uri},
-                                       {"languageId", "python"},
+                                       {"languageId", languageId(e)},
                                        {"version", 1},
                                        {"text", e->text()}}}});
         } else if (dirty.contains(uri)) {
@@ -184,9 +233,10 @@ class Language : public QObject {
         notify("textDocument/didClose", {{"textDocument", Obj{{"uri", uri}}}});
       }
   }
-  QStringList command() const {
-    auto override = qgetenv("INKLINE_PYTHON_LSP");
-    if (override.isEmpty()) override = qgetenv("INKEDIT_PYTHON_LSP");
+  QStringList command() {
+    auto key = "INKLINE_" + serverFamily.toUpper().toLatin1() + "_LSP";
+    auto override = qgetenv(key.constData());
+    if (override.isEmpty() && serverFamily == "python") override = qgetenv("INKEDIT_PYTHON_LSP");
     QStringList args;
     if (!override.isEmpty()) {
       for (auto part : QJsonDocument::fromJson(override).array()) {
@@ -196,28 +246,39 @@ class Language : public QObject {
       }
       return args;
     }
-    for (QString name :
-         {"pylsp", "pyright-langserver", "basedpyright-langserver"}) {
+    for (const QString &name : providers(serverFamily)) {
       auto exe = QStandardPaths::findExecutable(name);
       if (!exe.isEmpty()) {
         args << exe;
-        if (name != "pylsp")
+        if (name.endsWith("pyright-langserver"))
           args << "--stdio";
+        if (name == "jdtls") {
+#ifdef Q_OS_WIN
+          // The upstream Windows batch wrapper invokes Python and pauses on exit.
+          if (exe.endsWith(".bat", Qt::CaseInsensitive) || exe.endsWith(".cmd", Qt::CaseInsensitive)) {
+            const auto script = QFileInfo(exe).dir().filePath("jdtls");
+            const auto python = QStandardPaths::findExecutable("python");
+            if (!QFileInfo(script).isFile() || python.isEmpty()) return {};
+            args = {python, script};
+          }
+#endif
+          if (!javaData) javaData = std::make_unique<QTemporaryDir>();
+          if (!javaData->isValid()) return {};
+          args << "-data" << javaData->path();
+        }
         return args;
       }
     }
     return {};
   }
-  bool start(Editor *e) {
+  bool start() {
     auto args = command();
     if (args.isEmpty())
       return false;
     QString program = args.takeFirst();
     starting = true;
+    process.setWorkingDirectory(root);
     process.start(program, args);
-    QString root = win->property("projectRoot").toString();
-    if (root.isEmpty())
-      root = QFileInfo(pathOf(e)).absolutePath();
     auto uri = QUrl::fromLocalFile(root).toString(QUrl::FullyEncoded);
     request(
         "initialize",
@@ -227,8 +288,11 @@ class Language : public QObject {
           Arr{Obj{{"uri", uri}, {"name", QFileInfo(root).fileName()}}}},
          {"capabilities",
           Obj{{"general", Obj{{"positionEncodings", Arr{"utf-16"}}}},
+              {"workspace", Obj{{"configuration", true}, {"workspaceFolders", true}}},
               {"textDocument",
                Obj{{"synchronization", Obj{{"dynamicRegistration", false}}},
+                   {"definition", Obj{{"linkSupport", true}}},
+                   {"references", Obj{}},
                    {"diagnostic", Obj{}},
                    {"completion", Obj{{"completionItem",
                                        Obj{{"snippetSupport", false}}}}}}}}}},
@@ -306,7 +370,7 @@ class Language : public QObject {
     int index = 0;
     if (kind != "definition" || labels.size() > 1) {
       bool ok;
-      auto value = QInputDialog::getItem(win, "Python 语言工具", "选择结果",
+      auto value = QInputDialog::getItem(win, "语言工具", "选择结果",
                                          labels, 0, false, &ok);
       if (!ok)
         return;
@@ -335,7 +399,7 @@ class Language : public QObject {
         if (file.isEmpty())
           return;
         open(file);
-        e = pythonTab(tabs->currentWidget());
+        e = qobject_cast<Editor *>(tabs->currentWidget());
         if (!e || QUrl(uri) != QUrl(uriOf(e)))
           return;
       }
@@ -395,6 +459,11 @@ class Language : public QObject {
             Arr{Obj{{"range", Obj{{"start", point}}}, {"message", issue}}});
   }
   void local(Editor *e, QString kind) {
+    if (serverFamily != "python") {
+      notice(QString("未获得语言服务结果。请检查 %1，或配置 INKLINE_%2_LSP。")
+                 .arg(providers(serverFamily).join(" / "), serverFamily.toUpper()));
+      return;
+    }
     auto pos = cursor(e);
     int row = pos["line"].toInt(), col = pos["character"].toInt();
     auto line = e->text(row);
@@ -514,8 +583,9 @@ class Language : public QObject {
   }
 
 public:
-  Language(QMainWindow *w, QTabWidget *t, std::function<void(QString)> fn)
-      : QObject(w), win(w), tabs(t), open(std::move(fn)) {
+  Language(QMainWindow *w, QTabWidget *t, std::function<void(QString)> fn,
+           QString id, QString directory)
+      : QObject(w), win(w), tabs(t), open(std::move(fn)), serverFamily(std::move(id)), root(std::move(directory)) {
     debounce.setSingleShot(true);
     debounce.setInterval(320);
     connect(&debounce, &QTimer::timeout, this, [this] { synchronize(); });
@@ -531,21 +601,6 @@ public:
               if (err == QProcess::FailedToStart)
                 stopped();
             });
-    auto menu = win->menuBar()->addMenu("代码");
-    auto sub = menu->addMenu("Python 语言工具");
-    auto add = [this, sub](QString kind, QString label, QString shortcut) {
-      auto action = sub->addAction(label);
-      if (!shortcut.isEmpty())
-        action->setShortcut(QKeySequence(shortcut));
-      connect(action, &QAction::triggered, this, [this, kind] { run(kind); });
-    };
-    add("completion", "符号补全…", "Ctrl+Alt+Space");
-    add("definition", "转到定义", "F12");
-    add("references", "查找引用…", "Shift+F12");
-    add("signatureHelp", "函数签名", "Ctrl+Shift+Space");
-    add("diagnostics", "查看诊断…", {});
-    connect(menu, &QMenu::aboutToShow, this,
-            [this, sub] { sub->setEnabled(pythonTab(tabs->currentWidget())); });
   }
   ~Language() override {
     process.disconnect(this);
@@ -555,8 +610,8 @@ public:
     }
   }
   void run(QString kind) {
-    ++queryGeneration;
-    auto e = pythonTab(tabs->currentWidget());
+    auto generation = ++queryGeneration;
+    auto e = qobject_cast<Editor *>(tabs->currentWidget());
     if (!e)
       return;
     QPointer<Editor> target = e;
@@ -564,7 +619,8 @@ public:
     auto where = cursor(e);
     auto original = e->text();
     auto active = [=] {
-      return target && tabs->currentWidget() == target &&
+      return generation == queryGeneration && target && tabs->currentWidget() == target &&
+             family(languageId(target)) == serverFamily &&
              uriOf(target) == uri && cursor(target) == where &&
              target->text() == original;
     };
@@ -582,8 +638,10 @@ public:
       if (kind == "diagnostics" && !pull) {
         if (diagnostics.contains(uri))
           present(target, kind, diagnostics[uri]);
-        else
+        else if (serverFamily == "python")
           local(target, kind);
+        else
+          notice("语言服务器尚未发布此文件的诊断");
         return;
       }
       if (kind == "diagnostics")
@@ -602,7 +660,7 @@ public:
       execute();
       return;
     }
-    if (starting || start(e))
+    if (starting || start())
       initialized << execute;
     else
       execute();
@@ -611,5 +669,31 @@ public:
 } // namespace
 void installLanguageTools(QMainWindow *window, QTabWidget *tabs,
                           std::function<void(QString)> openFile) {
-  new Language(window, tabs, std::move(openFile));
+  auto menu = window->menuBar()->addMenu("代码");
+  auto sub = menu->addMenu("语言工具");
+  auto sessions = std::make_shared<QMap<QPair<QString, QString>, Language *>>();
+  auto add = [=](QString kind, QString label, QString shortcut) {
+    auto action = sub->addAction(label);
+    if (!shortcut.isEmpty()) action->setShortcut(QKeySequence(shortcut));
+    QObject::connect(action, &QAction::triggered, window, [=] {
+      auto *e = qobject_cast<Editor *>(tabs->currentWidget());
+      auto id = family(languageId(e));
+      if (id.isEmpty()) return;
+      const auto root = workspace(window, e);
+      auto &session = (*sessions)[{id, root}];
+      if (!session) session = new Language(window, tabs, openFile, id, root);
+      session->run(kind);
+    });
+  };
+  add("completion", "符号补全…", "Ctrl+Alt+Space");
+  add("definition", "转到定义", "F12");
+  add("references", "查找引用…", "Shift+F12");
+  add("signatureHelp", "函数签名", "Ctrl+Shift+Space");
+  add("diagnostics", "查看诊断…", {});
+  auto update = [=] {
+    sub->setEnabled(!languageId(qobject_cast<Editor *>(tabs->currentWidget())).isEmpty());
+  };
+  QObject::connect(menu, &QMenu::aboutToShow, window, update);
+  QObject::connect(tabs, &QTabWidget::currentChanged, window, update);
+  update();
 }

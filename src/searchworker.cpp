@@ -183,6 +183,10 @@ QJsonObject folder(const QJsonObject &p, const QRegularExpression &pattern,
                    Pages &pages) {
   QDir root(p["root"].toString());
   const bool names = p["op"] == "names";
+  const bool replacing = p["op"] == "replace-preview";
+  QJsonArray preview;
+  qsizetype previewChars = 0;
+  int previewCount = 0;
   QStringList dirs{root.absolutePath()};
   auto selected = p["files"].toArray();
   if (!selected.isEmpty())
@@ -198,6 +202,53 @@ QJsonObject folder(const QJsonObject &p, const QRegularExpression &pattern,
     if (names) {
       if (pattern.match(rel).hasMatch())
         pages.add({rel, 0, 0, 0, "", path, -1});
+      return;
+    }
+    if (replacing) {
+      Document doc;
+      try {
+        doc = Document::open(path);
+      } catch (const std::exception &) {
+        ++skipped;
+        return;
+      }
+      QJsonArray rows;
+      int line = 1;
+      qsizetype cursor = 0;
+      auto matches = pattern.globalMatch(doc.text);
+      while (matches.hasNext()) {
+        const auto m = matches.next();
+        const auto at = m.capturedStart();
+        const auto before = m.captured();
+        const auto after = p["regex"].toBool()
+            ? expand(p["replacement"].toString(), m) : p["replacement"].toString();
+        if (before == after)
+          continue;
+        previewChars += before.size() + after.size();
+        if (++previewCount > 5000 || previewChars > 4 * 1024 * 1024)
+          fail("预览过大，请缩小文件夹、文件匹配或查找范围。");
+        while (cursor < at) {
+          const auto c = doc.text[cursor++];
+          if (c == '\r' || (c == '\n' && (cursor < 2 || doc.text[cursor - 2] != '\r')))
+            ++line;
+        }
+        auto left = at, right = m.capturedEnd();
+        while (left > 0 && at - left < 35 && doc.text[left - 1] != '\r' && doc.text[left - 1] != '\n')
+          --left;
+        while (right < doc.text.size() && right - m.capturedEnd() < 55 &&
+               doc.text[right] != '\r' && doc.text[right] != '\n')
+          ++right;
+        rows.append(QJsonObject{{"start", at}, {"line", line},
+                                {"prefix", doc.text.mid(left, at - left)},
+                                {"suffix", doc.text.mid(m.capturedEnd(), right - m.capturedEnd())},
+                                {"before", before}, {"after", after}});
+      }
+      if (!matches.isValid())
+        fail("正则表达式超出匹配限制，请简化表达式");
+      if (!rows.isEmpty())
+        preview.append(QJsonObject{{"path", path}, {"relative", rel},
+            {"canonical", info.canonicalFilePath()}, {"digest", QString::fromLatin1(doc.digest.toHex())},
+            {"codec", QString::fromLatin1(doc.codec)}, {"matches", rows}});
       return;
     }
     if (info.size() >= 32 * 1024 * 1024 || !selected.isEmpty()) {
@@ -268,6 +319,8 @@ QJsonObject folder(const QJsonObject &p, const QRegularExpression &pattern,
       }
     }
   }
+  if (replacing)
+    return {{"preview", preview}, {"count", previewCount}, {"skipped", skipped}};
   return {{"count", pages.count},
           {"status", names && pages.count >= 2000
                          ? QString("已显示前 2000 项，请缩小范围。")

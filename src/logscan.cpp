@@ -9,6 +9,7 @@
 #include <QJsonObject>
 #include <QQueue>
 #include <QRegularExpression>
+#include <algorithm>
 #include <cstdio>
 #include <stdexcept>
 #ifdef Q_OS_WIN
@@ -231,11 +232,103 @@ void visitLineStarts(QFile &f, qint64 pos, qint64 size, Visitor visit) {
     pos += data.size();
   }
 }
+// A JSONL record can be larger than RAM. Retain only top-level timestamp keys
+// and their short string values while skipping nested data and escaped quotes.
+class JsonTimestamp {
+  int depth = 0;
+  char previous = 0;
+  bool quoted = false, escaped = false, isKey = false, isValue = false;
+  bool timeKey = false;
+  QByteArray token;
+public:
+  qint64 key = -1;
+  void feed(QByteArrayView data) {
+    for (char c : data) {
+      if (quoted) {
+        if (!escaped && c == '"') {
+          quoted = false;
+          if (isKey || isValue) {
+            if (token.contains('\\'))
+              token = QJsonDocument::fromJson("[\"" + token + "\"]").array().at(0).toString().toUtf8();
+            if (isKey)
+              timeKey = token == "timestamp" || token == "@timestamp" || token == "time";
+            if (isValue) {
+              key = logDateTimeKey(QString::fromUtf8(token));
+              if (key >= 0) return;
+            }
+          }
+          previous = '"';
+        } else {
+          if ((isKey || isValue) && token.size() < 192)
+            token += c;
+          escaped = !escaped && c == '\\';
+        }
+      } else if (c == '"') {
+        quoted = true;
+        isKey = depth == 1 && (previous == '{' || previous == ',');
+        isValue = depth == 1 && previous == ':' && timeKey;
+        token.clear();
+      } else if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+        if (c == '{' || c == '[') ++depth;
+        if (c == '}' || c == ']') --depth;
+        previous = c;
+      }
+    }
+  }
+};
+
+qint64 findTimestamp(QFile &file, qint64 size, qint64 target) {
+  qint64 row = 0;
+  QByteArray prefix;
+  enum { Unknown, Plain, Json } format = Unknown;
+  JsonTimestamp json;
+  while (file.pos() < size) {
+    const auto pos = file.pos();
+    const auto data = file.read(qMin(chunkSize, size - pos));
+    if (data.isEmpty()) fail("日志在扫描期间被截断");
+    qsizetype i = 0;
+    while (i < data.size()) {
+      const auto delimiter = std::find_if(data.cbegin() + i, data.cend(),
+          [](char c) { return c == '\n' || c == '\r'; });
+      const auto end = delimiter - data.cbegin();
+      auto part = QByteArrayView(data).sliced(i, end - i);
+      if (format == Unknown) {
+        if (!pos && !i && part.startsWith("\xef\xbb\xbf"))
+          part = part.sliced(3);
+        while (!part.isEmpty() && (part.front() == ' ' || part.front() == '\t'))
+          part = part.sliced(1);
+        if (!part.isEmpty())
+          format = part.front() == '{' ? Json : Plain;
+      }
+      if (prefix.size() < 128)
+        prefix.append(part.first(qMin<qsizetype>(part.size(), 128 - prefix.size())));
+      if (format == Json && json.key < 0)
+        json.feed(part);
+      if (delimiter != data.cend() || file.pos() == size) {
+        const auto key = json.key >= 0 ? json.key : logDateTimeKey(QString::fromUtf8(prefix));
+        if (key >= target)
+          return row;
+        row = pos + end + 1;
+        prefix.clear();
+        json = {};
+        format = Unknown;
+      }
+      i = end + (delimiter != data.cend());
+    }
+  }
+  return -1;
+}
+
 QJsonObject execute(const QJsonObject &j) {
   const auto path = j["path"].toString(), kind = j["kind"].toString(),
              query = j["query"].toString();
   const bool session = j["session"].toBool();
-  const auto pattern = session ? sessionPattern(QRegularExpression::escape(query)) : query;
+  const auto fields = j["fields"].toObject();
+  const bool onlyFields = !session && query.isEmpty() &&
+                          (!fields.isEmpty() || j["fromSecond"].toInt(-1) >= 0);
+  const auto pattern = session ? sessionPattern(QRegularExpression::escape(query))
+                               : onlyFields ? QStringLiteral("^") : query;
+  const bool regex = session || onlyFields || j["regex"].toBool();
   const auto codec = j["codec"].toString().toLatin1();
   auto start = j["start"].toInteger(), size = j["size"].toInteger();
   QFile f(path);
@@ -243,6 +336,78 @@ QJsonObject execute(const QJsonObject &j) {
   if (f.size() < size)
     fail("日志已被截断");
   QJsonObject result;
+  if (kind == "timestamp") {
+    const auto target = logDateTimeKey(j["timestamp"].toString());
+    if (target < 0) fail("请输入有效的日期时间");
+    const auto offset = findTimestamp(f, size, target);
+    if (offset < 0) fail("没有找到达到该日期时间的日志记录");
+    result["offset"] = offset;
+    return result;
+  }
+  auto headerAt = [&](qint64 begin, QByteArray prefix = {}) {
+    if (prefix.isEmpty())
+      prefix = readAt(f, begin, qMin<qint64>(96, size - begin));
+    if (auto nl = prefix.indexOf('\n'); nl >= 0)
+      prefix.truncate(nl);
+    if (!begin && prefix.startsWith("\xef\xbb\xbf"))
+      prefix.remove(0, 3);
+    if (prefix.trimmed().startsWith('{')) {
+      const auto length = lineEnd(f, begin, size) - begin;
+      if (length > 32 * 1024 * 1024)
+        return true;
+      auto raw = readAt(f, begin, length);
+      if (QJsonDocument::fromJson(decode(raw, codec, false).toUtf8()).isObject())
+        return true;
+    }
+    return logClock().match(QString::fromLatin1(prefix)).hasMatch();
+  };
+  if (kind == "event") {
+    const auto offset = j["offset"].toInteger(-1);
+    if (offset < 0 || offset >= size)
+      fail("匹配位置超出文件范围");
+    const auto row = lineBeginning(f, offset);
+    auto begin = row;
+    bool found = headerAt(row);
+    // Traverse the preceding lines in blocks, including headers split across blocks.
+    for (qint64 pos = row; !found && pos > 0;) {
+      const auto base = qMax<qint64>(0, pos - chunkSize);
+      const auto bytes = readAt(f, base, pos - base);
+      for (qsizetype i = bytes.size(); i-- > 0;) {
+        const auto candidate = base + i + 1;
+        if (bytes[i] == '\n' && candidate < row &&
+            headerAt(candidate, bytes.size() - i > 96 ? bytes.mid(i + 1, 96) : QByteArray())) {
+          begin = candidate;
+          found = true;
+          break;
+        }
+      }
+      pos = base;
+    }
+    if (!found && headerAt(0)) {
+      found = true;
+      begin = 0;
+    }
+    qint64 end = size;
+    if (found) {
+      for (auto pos = row; pos < size && end == size;) {
+        const auto bytes = readAt(f, pos, qMin(chunkSize, size - pos));
+        for (auto i = bytes.indexOf('\n'); i >= 0; i = bytes.indexOf('\n', i + 1)) {
+          const auto next = pos + i + 1;
+          if (next < size && headerAt(next, bytes.size() - i > 96 ? bytes.mid(i + 1, 96) : QByteArray())) {
+            end = next;
+            break;
+          }
+        }
+        pos += bytes.size();
+      }
+    } else {
+      end = lineEnd(f, row, size);
+    }
+    if (end - begin > 32 * 1024 * 1024)
+      fail("事件超过 32 MiB，无法展开到剪贴板或详情窗口");
+    result["text"] = decode(readAt(f, begin, end - begin), codec, false);
+    return result;
+  }
   if (kind == "line") {
     const qint64 line = j["line"].toInteger();
     if (line < 1)
@@ -278,17 +443,73 @@ QJsonObject execute(const QJsonObject &j) {
     return result;
   }
   const int first = j["fromSecond"].toInt(-1), last = j["toSecond"].toInt(-1);
-  auto inTimeRange = [&](qint64 begin) {
-    if (first < 0)
-      return true;
-    static const QRegularExpression clock(
-        QStringLiteral(R"(^\s*\[?(?:\d{4}[-/]\d{2}[-/]\d{2}[ T])?(\d{2}:\d{2}:\d{2})(?!\d))"));
-    auto prefix = readAt(f, begin, qMin<qint64>(64, size - begin));
-    auto match = clock.match(QString::fromUtf8(prefix));
-    auto time = QTime::fromString(match.captured(1), "HH:mm:ss");
-    int sec = time.msecsSinceStartOfDay() / 1000;
-    return time.isValid() && (first <= last ? sec >= first && sec <= last
-                                            : sec >= first || sec <= last);
+  auto scan = [&](qint64 from, const RecordVisitor &visit) {
+    if (fields.isEmpty() && first < 0) {
+      visitLogRecords(path, size, from, codec, pattern, regex, j["case"].toBool(), visit);
+      return;
+    }
+    QRegularExpression matcher(regex ? pattern : QRegularExpression::escape(pattern),
+        j["case"].toBool() ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption);
+    if (!matcher.isValid())
+      fail(matcher.errorString());
+    QFile input(path);
+    openLog(input);
+    if (!input.seek(from))
+      fail(input.errorString());
+    auto record = [&](qint64 begin, qint64 end, const QByteArray &raw) {
+      auto text = decode(raw, codec, false);
+      const auto match = onlyFields ? QRegularExpressionMatch{} : matcher.match(text);
+      bool keep = (onlyFields || match.hasMatch()) &&
+                  (fields.isEmpty() || matchesLogFields(text, fields));
+      if (keep && first >= 0) {
+        QString stamp = text;
+        if (text.trimmed().startsWith('{')) {
+          const auto object = QJsonDocument::fromJson(text.toUtf8()).object();
+          for (const auto key : {"timestamp", "time", "@timestamp"}) {
+            if (!object.value(key).isString()) continue;
+            stamp = object.value(key).toString();
+            break;
+          }
+        }
+        const auto time = QTime::fromString(logClock().match(stamp).captured(1), "HH:mm:ss");
+        const int sec = time.msecsSinceStartOfDay() / 1000;
+        keep = time.isValid() && (first <= last ? sec >= first && sec <= last : sec >= first || sec <= last);
+      }
+      const auto pos = onlyFields || !keep ? 0 : match.capturedStart();
+      const qint64 hit = keep ? begin + (pos ? byteOffset(text, pos, raw, codec) : 0) : -1;
+      return visit(begin, end, hit, keep && !onlyFields ? match.capturedLength() : 0,
+                   keep ? text.mid(qMax<qsizetype>(0, pos - 60), 220) : QString());
+    };
+    qint64 begin = from;
+    QByteArray pending;
+    while (input.pos() < size) {
+      const auto chunkStart = input.pos();
+      auto bytes = input.read(qMin(chunkSize, size - chunkStart));
+      if (bytes.isEmpty())
+        fail("日志在扫描期间被截断");
+      qsizetype offset = 0;
+      while (offset < bytes.size()) {
+        auto nl = bytes.indexOf('\n', offset);
+        if (nl < 0 && input.pos() < size) {
+          pending.append(bytes.constData() + offset, bytes.size() - offset);
+          break;
+        }
+        const auto stop = nl < 0 ? bytes.size() : nl;
+        auto line = QByteArray::fromRawData(bytes.constData() + offset, stop - offset);
+        if (!pending.isEmpty()) {
+          pending.append(line);
+          line.swap(pending);
+          pending.clear();
+        }
+        if (line.endsWith('\r'))
+          line.chop(1);
+        offset = nl < 0 ? stop : stop + 1;
+        const qint64 end = chunkStart + offset;
+        if (!record(begin, end, line))
+          return;
+        begin = end;
+      }
+    }
   };
   QJsonArray hits;
   qint64 more = -1, resume = size;
@@ -326,11 +547,8 @@ QJsonObject execute(const QJsonObject &j) {
     int context = j["context"].toInt(), after = 0;
     QQueue<qint64> previous;
     qint64 written = 0, count = 0;
-    visitLogRecords(
-        path, size, 0, codec, pattern, session || j["regex"].toBool(), j["case"].toBool(),
+    scan(0,
         [&](qint64 begin, qint64 end, qint64 hit, qsizetype, const QString &) {
-          if (hit >= 0 && !inTimeRange(begin))
-            hit = -1;
           if (hit >= 0 || after > 0) {
             auto first =
                 (hit >= 0 && !previous.isEmpty()) ? previous.head() : begin;
@@ -354,13 +572,12 @@ QJsonObject execute(const QJsonObject &j) {
   }
   int limit = qBound(1, j["limit"].toInt(200), 200);
   if (j["filter"].toBool()) {
-    visitLogRecords(path, size, start, codec, pattern, session || j["regex"].toBool(),
-                    j["case"].toBool(),
+    scan(start,
                     [&](qint64 begin, qint64 end, qint64 hit, qsizetype len,
                         const QString &preview) {
                       if (end == size && readAt(f, size - 1, 1) != "\n")
                         resume = begin;
-                      if (hit >= 0 && inTimeRange(begin))
+                      if (hit >= 0)
                         hits.append(QJsonArray{hit, qint64(len), preview});
                       if (hits.size() < limit)
                         return true;

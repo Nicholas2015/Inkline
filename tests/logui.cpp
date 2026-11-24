@@ -4,6 +4,8 @@
 #include "logview.h"
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
+#include <QLineEdit>
 #include <QComboBox>
 #include <QDialog>
 #include <QElapsedTimer>
@@ -168,6 +170,81 @@ int main(int argc, char **argv) {
   for(const auto &fmt:block.layout()->formats())
     if(fmt.start==index && fmt.length==4 && fmt.format.foreground().color()==LogStyle::ink(LogStyle::Warn) && fmt.format.background().color()==LogStyle::keywordColors[0])combined=true;
   if(!combined)return 23;
+  QFile events(tmp.filePath("events.log"));
+  if (!events.open(QIODevice::WriteOnly)) return 26;
+  const QByteArray header = "2026-11-24 23:59:10 | sidecar | ERROR | trace_id=abc request_id=req session_id=42\n";
+  const QByteArray stack = "Traceback:\n  frame one\n\n  frame two\n";
+  events.write(header + stack);
+  events.write("2026-11-24 23:59:11 | sidecar | ERROR | trace_id=abcd request_id=req session_id=42\n");
+  events.close();
+  Log eventView(events.fileName());
+  eventView.showSearch();
+  auto *eventDialog = eventView.findChild<QDialog *>();
+  auto *eventList = eventDialog->findChild<QListWidget *>();
+  QComboBox *eventTerms = nullptr;
+  for (auto *combo : eventDialog->findChildren<QComboBox *>()) {
+    if (combo->isEditable())
+      eventTerms = combo;
+    else
+      combo->setCurrentIndex(1);
+  }
+  auto eventClick = [&](QString label) {
+    for (auto *btn : eventDialog->findChildren<QPushButton *>())
+      if (btn->text() == label && btn->isEnabled()) {
+        btn->click();
+        return true;
+      }
+    return false;
+  };
+  const QMap<QString, QString> criteria{{"level","error"},{"source","sidecar"},
+      {"trace_id","abc"},{"request_id","req"},{"session_id","42"}};
+  for (auto i = criteria.begin(); i != criteria.end(); ++i)
+    eventDialog->findChild<QLineEdit *>("logFilter_" + i.key())->setText(i.value());
+  if (!eventClick("查找") || !wait([&] { return eventList->count() == 1; })) return 27;
+  auto *eventFollow = eventView.findChild<QToolButton *>("followTail");
+  eventFollow->click();
+  if (!events.open(QIODevice::Append)) return 28;
+  events.write(header);
+  events.close();
+  if (!wait([&] { return eventList->count() == 2; })) return 29;
+  eventFollow->click();
+  for (auto i = criteria.begin(); i != criteria.end(); ++i)
+    eventDialog->findChild<QLineEdit *>("logFilter_" + i.key())->clear();
+  eventTerms->setEditText("frame two");
+  if (!eventClick("查找") || !wait([&] { return eventList->count() == 1; })) return 30;
+  eventList->setCurrentRow(0);
+  if (!eventClick("复制完整事件") || !wait([&] {
+      return QApplication::clipboard()->text() == QString::fromUtf8(header + stack);
+    })) return 31;
+  if (!eventClick("展开事件") || !wait([&] {
+      auto *eventText = eventDialog->findChild<QPlainTextEdit *>("logEventText");
+      return eventText && eventText->toPlainText() == QString::fromUtf8(header + stack);
+    })) return 32;
+  QFile dated(tmp.filePath("dated.log"));
+  if (!dated.open(QIODevice::WriteOnly)) return 33;
+  dated.write("23:59:59 undated\n2026-11-23 23:59:59 last night\n");
+  const auto jsonOffset = dated.pos();
+  dated.write("{\"payload\":{\"timestamp\":\"2099-01-01T00:00:00\"},\"message\":\"");
+  dated.write(QByteArray(300000,'x'));
+  dated.write("\",\"timestamp\":\"2026-11-24T01:00:00.110Z\"}\n");
+  const auto expected = dated.pos();
+  dated.write("2026-11-26 01:00:00.000 first qualifying row\n");
+  dated.write("2026-11-24 01:00:00.111 exact match appears later\n");
+  dated.close();
+  Log byDate(dated.fileName());
+  auto *dateStatus = byDate.findChild<QLabel *>("logPosition");
+  byDate.gotoTimestamp("2026-11-24 01:00:00.111");
+  if (!wait([&] { return byDate.saveView()["offset"].toInteger() == expected; })) return 34;
+  byDate.gotoTimestamp("2026-11-24 01:00:00.110");
+  if (!wait([&] { return byDate.saveView()["offset"].toInteger() == jsonOffset; })) return 35;
+  byDate.gotoTimestamp("2099-01-01 00:00:00");
+  if (!wait([&] { return dateStatus->text().contains("没有找到"); })) return 36;
+  byDate.gotoTimestamp("2026-02-30 00:00:00");
+  if (!dateStatus->text().contains("请输入")) return 37;
+  byDate.gotoTimestamp("2099-01-01 00:00:00");
+  for (auto *btn : byDate.findChildren<QPushButton *>())
+    if (btn->text() == "取消定位") btn->click();
+  if (!dateStatus->text().contains("已取消")) return 38;
   puts("Native log UI navigation, following, search, continuation, selection "
        "and cancellation passed.");
 }

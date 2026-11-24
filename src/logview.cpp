@@ -16,6 +16,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFontDatabase>
+#include <QFormLayout>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -76,6 +77,7 @@ struct Log::State {
   QComboBox *codec = new QComboBox;
   QLabel *position = new QLabel;
   QPushButton *more = nullptr, *go = nullptr, *stop = nullptr;
+  QPushButton *cancelJump = new QPushButton("取消定位");
   QToolButton *follow = new QToolButton;
   QMenu *marks = nullptr;
   struct Mark {
@@ -86,6 +88,8 @@ struct Log::State {
   QMap<qint64, Mark> bookmarks;
   QDialog *dialog;
   QComboBox *mode = new QComboBox, *terms = new QComboBox;
+  QWidget *fieldPanel = new QWidget;
+  QMap<QString, QLineEdit *> fieldInputs;
   QCheckBox *regex = new QCheckBox("正则"),
             *sensitive = new QCheckBox("区分大小写");
   QCheckBox *timeRange = new QCheckBox("限定时段");
@@ -284,8 +288,23 @@ struct Log::State {
                          visit(pos);
                        });
   }
+  QJsonObject fields() const {
+    QJsonObject result;
+    if (mode->currentIndex() == 1)
+      for (auto i = fieldInputs.begin(); i != fieldInputs.end(); ++i) {
+        auto value = i.value()->text().trimmed();
+        if (!value.isEmpty())
+          result.insert(i.key(), value);
+      }
+    return result;
+  }
+  bool hasCriteria() const {
+    return !terms->currentText().isEmpty() ||
+           (mode->currentIndex() == 1 && (!fields().isEmpty() || timeRange->isChecked()));
+  }
   void updateControls() {
-    go->setEnabled(!terms->currentText().isEmpty());
+    cancelJump->setVisible(job && job->property("timestampJump").toBool());
+    go->setEnabled(hasCriteria());
     stop->setEnabled(job != nullptr);
     more->setEnabled(!job && continuation >= 0);
   }
@@ -312,6 +331,7 @@ struct Log::State {
     regex->setEnabled(mode->currentIndex() == 1);
     sensitive->setEnabled(mode->currentIndex() == 1);
     const bool filtering = mode->currentIndex() != 0;
+    fieldPanel->setVisible(mode->currentIndex() == 1);
     timeRange->setVisible(filtering);
     fromTime->setVisible(filtering && timeRange->isChecked());
     untilLabel->setVisible(filtering && timeRange->isChecked());
@@ -371,6 +391,7 @@ struct Log::State {
             {"size", QFileInfo(path).size()},
             {"query", terms->currentText()},
             {"filter", filter},
+            {"fields", fields()},
             {"session", mode->currentIndex() == 2},
             {"fromSecond", filter && timeRange->isChecked() ? fromTime->time().msecsSinceStartOfDay() / 1000 : -1},
             {"toSecond", filter && timeRange->isChecked() ? toTime->time().msecsSinceStartOfDay() / 1000 : -1},
@@ -380,6 +401,7 @@ struct Log::State {
   void launch(QJsonObject req, std::function<void(QJsonObject)> done) {
     cancel();
     auto *proc = new QProcess(owner);
+    proc->setProperty("timestampJump", req["kind"] == "timestamp");
     QObject::connect(proc, &QObject::destroyed, [keepAlive = done] {});
     job = proc;
     updateControls();
@@ -418,7 +440,7 @@ struct Log::State {
     proc->start(QCoreApplication::applicationFilePath(), {"--log-job"});
   }
   void search(qint64 from = 0, bool append = false) {
-    if (terms->currentText().isEmpty())
+    if (!hasCriteria())
       return;
     QFileInfo info(path);
     if (from > 0 && !append &&
@@ -436,8 +458,10 @@ struct Log::State {
     filterActive = mode->currentIndex() != 0;
     QString term = terms->currentText();
     auto history = QSettings().value("log/history").toStringList();
-    history.removeAll(term);
-    history.prepend(term);
+    if (!term.isEmpty()) {
+      history.removeAll(term);
+      history.prepend(term);
+    }
     while (history.size() > 20)
       history.removeLast();
     QSettings().setValue("log/history", history);
@@ -473,8 +497,46 @@ struct Log::State {
                           .arg(continuation >= 0 ? " · 可继续扫描" : ""));
     });
   }
+  void showEvent(bool copy) {
+    const auto *item = hits->currentItem();
+    if (!item)
+      return;
+    const QFileInfo info(path);
+    if (info.birthTime() != snapshotBirth || info.size() < snapshotSize ||
+        (info.size() == snapshotSize && info.lastModified() != snapshotTime)) {
+      status->setText("日志已变化，请重新搜索");
+      return;
+    }
+    auto req = request("event");
+    req["size"] = snapshotSize;
+    req["offset"] = item->data(Qt::UserRole).toLongLong();
+    launch(req, [this, copy](const QJsonObject &r) {
+      const auto text = r["text"].toString();
+      if (copy) {
+        QApplication::clipboard()->setText(text);
+        status->setText("已复制完整事件");
+        return;
+      }
+      auto *detail = new QDialog(dialog);
+      detail->setAttribute(Qt::WA_DeleteOnClose);
+      detail->setWindowTitle("完整日志事件");
+      auto *layout = new QVBoxLayout(detail);
+      auto *body = new QPlainTextEdit;
+      body->setObjectName("logEventText");
+      body->setReadOnly(true);
+      body->setFont(Appearance::codeFont());
+      body->setPlainText(text);
+      layout->addWidget(body);
+      auto *copyButton = button(layout, "复制完整事件");
+      QObject::connect(copyButton, &QPushButton::clicked, detail, [text] {
+        QApplication::clipboard()->setText(text);
+      });
+      detail->resize(720, 440);
+      detail->show();
+    });
+  }
   void output(bool all, bool clipboard) {
-    if (terms->currentText().isEmpty() || (!all && !hits->count()))
+    if (!hasCriteria() || (!all && !hits->count()))
       return;
     auto req = request(all ? "all" : "batch");
     if (!all && (snapshotBirth != QFileInfo(path).birthTime() ||
@@ -566,6 +628,11 @@ Log::Log(const QString &file) : d(std::make_unique<State>(this, file)) {
   auto *footer = new QHBoxLayout;
   footer->setContentsMargins(12, 2, 8, 2);
   footer->addWidget(s.position, 1);
+  footer->addWidget(s.cancelJump);
+  connect(s.cancelJump, &QPushButton::clicked, this, [this] {
+    d->cancel();
+    d->notice("已取消日期时间定位");
+  });
   footer->addWidget(s.codec);
   layout->addLayout(footer);
   s.codec->addItems({"UTF-8", "GBK"});
@@ -601,6 +668,17 @@ Log::Log(const QString &file) : d(std::make_unique<State>(this, file)) {
   row->addWidget(s.mode);
   row->addWidget(s.terms);
   auto *filters = new QVBoxLayout;
+  auto *fieldForm = new QFormLayout(s.fieldPanel);
+  fieldForm->setContentsMargins(0, 0, 0, 0);
+  for (const QString key : {"level", "source", "trace_id", "request_id", "session_id"}) {
+    auto *input = new QLineEdit;
+    input->setObjectName("logFilter_" + key);
+    fieldForm->addRow(key, input);
+    s.fieldInputs.insert(key, input);
+    connect(input, &QLineEdit::textChanged, this, [this] { d->reset(); });
+    connect(input, &QLineEdit::returnPressed, this, [this] { d->search(); });
+  }
+  filters->addWidget(s.fieldPanel);
   filters->addWidget(s.regex);filters->addWidget(s.sensitive);filters->addWidget(s.timeRange);
   for (auto *edit : {s.fromTime, s.toTime}) {
     edit->setDisplayFormat("HH:mm:ss");
@@ -633,6 +711,16 @@ Log::Log(const QString &file) : d(std::make_unique<State>(this, file)) {
   s.more = button(nav, "继续扫描");
   output->addLayout(nav);
   auto *exports = new QHBoxLayout;
+  auto *expandEvent = button(exports, "展开事件");
+  auto *copyEvent = button(exports, "复制完整事件");
+  expandEvent->setEnabled(false);
+  copyEvent->setEnabled(false);
+  connect(s.hits, &QListWidget::currentItemChanged, this, [expandEvent, copyEvent](QListWidgetItem *item) {
+    expandEvent->setEnabled(item != nullptr);
+    copyEvent->setEnabled(item != nullptr);
+  });
+  connect(expandEvent, &QPushButton::clicked, this, [this] { d->showEvent(false); });
+  connect(copyEvent, &QPushButton::clicked, this, [this] { d->showEvent(true); });
   exports->addStretch();
   auto *copy = button(exports, "复制本批匹配行"),
        *save = button(exports, "导出本批…"),
@@ -741,6 +829,19 @@ Log::~Log() {
   d->cancel();
 }
 QString Log::filePath() const { return d->path; }
+void Log::relocateFile(const QString &absolute) {
+  const auto path = QFileInfo(absolute).absoluteFilePath();
+  if (path == d->path)
+    return;
+  const auto view = saveView();
+  d->reset();
+  d->path = path;
+  setProperty("filePath", path);
+  d->dialog->setWindowTitle("日志检索 — " + QFileInfo(path).fileName());
+  d->anchors.clear();
+  d->tailSize = -1;
+  restoreView(view);
+}
 QJsonObject Log::saveView() const {
   const auto cursor = d->view->textCursor();
   return {{"offset", d->start},
@@ -837,16 +938,42 @@ void Log::gotoLine(qint64 line) {
     const auto at=r["offset"].toInteger();gotoByte(at);d->view->confirmFirstLine(at,line);
   });
 }
+void Log::gotoTimestamp(const QString &timestamp) {
+  static const QRegularExpression format(R"(^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{3})?$)");
+  if (!format.match(timestamp).hasMatch() || logDateTimeKey(timestamp) < 0) {
+    d->notice("请输入 YYYY-MM-DD HH:mm:ss，可添加三位毫秒");
+    return;
+  }
+  auto req = d->request("timestamp");
+  req["timestamp"] = timestamp;
+  const QFileInfo snapshot(d->path);
+  const auto size = snapshot.size();
+  const auto birth = snapshot.birthTime(), modified = snapshot.lastModified();
+  d->follow->setChecked(false);
+  d->notice("正在按日期时间定位…");
+  d->launch(req, [this, size, birth, modified](const QJsonObject &result) {
+    const QFileInfo current(d->path);
+    if (current.birthTime() != birth || current.size() < size ||
+        (current.size() == size && current.lastModified() != modified)) {
+      d->notice("日志在定位期间发生变化，请重试");
+      return;
+    }
+    gotoByte(result["offset"].toInteger());
+  });
+}
 void Log::jumpDialog() {
   bool ok = false;
   auto input =
       QInputDialog::getText(this, "跳转到文件位置",
-                            "行号输入 #128，也可输入 50%、1 GB、64 KiB",
+                            "输入 #行号、百分比、字节位置，或日期时间 YYYY-MM-DD HH:mm:ss[.zzz]",
                             QLineEdit::Normal, {}, &ok)
           .trimmed();
   if (!ok)
     return;
-  if (input.startsWith('#')) {
+  if (input.size() >= 5 && input[4] == '-') {
+    gotoTimestamp(input);
+    return;
+  } else if (input.startsWith('#')) {
     auto line = input.mid(1).toLongLong(&ok);
     if (ok && line > 0) {
       gotoLine(line);

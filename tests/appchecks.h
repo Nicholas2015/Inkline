@@ -1,5 +1,6 @@
 #pragma once
 #include <QSslSocket>
+#include <QElapsedTimer>
 // Runs the deployed executable against disposable settings and real editor
 // widgets.
 static int verifyInstall(const QString &output) {
@@ -152,6 +153,53 @@ static int verifyInstall(const QString &output) {
       verifyTokens("properties", "server.port=8080", 1, 13);
       verifyTokens("YML", "port: 8080", 1, 7);
       verifyTokens("json", R"({"port":8080})", 2, 9);
+    }
+    {
+      Window w;
+      auto path = temp.filePath("formatter.json");
+      const auto raw = QByteArray(R"({"count":9007199254740993,"name":"demo"})");
+      put(path, raw);
+      w.open(path);
+      auto *tabs = w.findChild<QTabWidget *>();
+      auto *e = dynamic_cast<Edit *>(tabs->currentWidget());
+      auto *validate = w.findChild<QAction *>("validateConfig");
+      auto *format = w.findChild<QAction *>("formatConfig");
+      require(e && validate && format, "configCommands");
+      auto waitConfig = [&] {
+        QElapsedTimer timer;
+        timer.start();
+        while (e->property("configBusy").toBool() && timer.elapsed() < 8000)
+          QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      };
+      format->trigger();
+      waitConfig();
+      require(e->text().contains("9007199254740993") && e->text().contains('\n') &&
+              Document::open(path).text == QString::fromUtf8(raw), "formatBufferOnly");
+      e->undo();
+      require(e->text() == QString::fromUtf8(raw), "undoConfigurationFormat");
+      e->setText("{\n  \"enabled\": nope\n}");
+      validate->trigger();
+      waitConfig();
+      int row, column;
+      e->getCursorPosition(&row, &column);
+      require(row == 1 && column > 0 && !w.statusBar()->currentMessage().isEmpty(),
+              "configurationErrorLocation");
+    }
+    {
+      Window w;
+      w.open(code);
+      auto *tabs = w.findChild<QTabWidget *>();
+      auto *e = dynamic_cast<Edit *>(tabs->currentWidget());
+      std::unique_ptr<Edit> left(linkedPane(e)), right(linkedPane(e));
+      left->setCursorPosition(0, 0);
+      left->SendScintilla(Edit::SCI_REPLACESEL, "# linked\\n");
+      require(e->dirty() && e->text().startsWith("# linked") && right->text() == e->text(),
+              "splitViewsShareEdits");
+      right->undo();
+      require(e->text() == Document::open(code).text && left->text() == right->text(), "splitSharedUndo");
+      require(WorkspaceFiles::relocated("/work/api/a.ini", "/work/api", "/work/v2") == "/work/v2/a.ini" &&
+              WorkspaceFiles::relocated("/work/api-old/b.ini", "/work/api", "/work/v2") == "/work/api-old/b.ini",
+              "workspaceRenameByComponent");
     }
     result.insert("passed", true);
   } catch (const std::exception &e) {

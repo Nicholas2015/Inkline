@@ -154,8 +154,55 @@ inline void openSplitReader(QMainWindow *window, QTabWidget *tabs) {
   }
   dialog.exec();
 }
+// Each pane has its own caret and viewport; Scintilla owns a single shared buffer and undo stack.
+inline Edit *linkedPane(Edit *source) {
+  Document metadata;
+  metadata.path = source->doc.path;
+  auto *pane = new Edit(std::move(metadata));
+  if (!source->language.isEmpty()) {
+    pane->language = source->language;
+    pane->applyLanguage();
+  }
+  pane->setDocument(source->document());
+  pane->setEolMode(source->eolMode());
+  pane->setReadOnly(source->isReadOnly());
+  editorPreferences(pane);
+  int row, col;
+  source->getCursorPosition(&row, &col);
+  pane->setCursorPosition(row, col);
+  pane->setFirstVisibleLine(source->firstVisibleLine());
+  return pane;
+}
+
+inline void openSplitEditor(QMainWindow *window, Edit *source, std::function<void(Edit *)> save) {
+  QDialog dialog(window);
+  const auto title = source->doc.path.isEmpty() ? QString("未命名") : QFileInfo(source->doc.path).fileName();
+  dialog.setWindowTitle("双栏编辑 — " + title);
+  dialog.resize(1000, 640);
+  auto *layout = new QVBoxLayout(&dialog);
+  auto *split = new QSplitter;
+  split->setChildrenCollapsible(false);
+  auto *left = linkedPane(source);
+  split->addWidget(left);
+  split->addWidget(linkedPane(source));
+  layout->addWidget(split, 1);
+  auto *footer = new QHBoxLayout;
+  footer->addStretch();
+  auto *saveButton = new QPushButton("保存");
+  saveButton->setShortcut(QKeySequence::Save);
+  footer->addWidget(saveButton);
+  auto *done = new QPushButton("关闭");
+  footer->addWidget(done);
+  layout->addLayout(footer);
+  QObject::connect(saveButton, &QPushButton::clicked, &dialog, [=] { save(source); });
+  QObject::connect(done, &QPushButton::clicked, &dialog, &QDialog::accept);
+  QObject::connect(source, &QObject::destroyed, &dialog, &QDialog::reject);
+  left->setFocus();
+  dialog.exec();
+}
+
 inline void installEditCommands(QMainWindow *window, QMenu *menu,
-                                QTabWidget *tabs) {
+                                QTabWidget *tabs, std::function<void(Edit *)> save) {
   auto current = [tabs] { return dynamic_cast<Edit *>(tabs->currentWidget()); };
   auto cmd = [=](QMenu *m, const QString &label, std::function<void(Edit *)> fn,
                  QKeySequence key = {}) {
@@ -296,5 +343,13 @@ inline void installEditCommands(QMainWindow *window, QMenu *menu,
     });
   view->addAction("多关键词高亮…", window,
                   [tabs] { highlightKeywords(tabs->currentWidget()); });
+  auto *splitEdit = view->addAction("双栏编辑当前文档…", window, [=] {
+    if (auto *e = dynamic_cast<Edit *>(tabs->currentWidget()); e && !e->isReadOnly())
+      openSplitEditor(window, e, save);
+  });
+  QObject::connect(view, &QMenu::aboutToShow, window, [=] {
+    auto *e = dynamic_cast<Edit *>(tabs->currentWidget());
+    splitEdit->setEnabled(e && !e->isReadOnly());
+  });
   view->addAction("双栏阅读…", window, [=] { openSplitReader(window, tabs); });
 }

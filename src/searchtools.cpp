@@ -1,4 +1,5 @@
 #include "searchtools.h"
+#include "batchreplaceeditor.h"
 #include "document.h"
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -596,6 +597,195 @@ public:
   }
 };
 
+class BatchReplace : public QDialog {
+  QTabWidget *tabs;
+  Job job{this};
+  QLineEdit *root = new QLineEdit, *glob = new QLineEdit("*"),
+            *query = new QLineEdit, *value = new QLineEdit;
+  QCheckBox *regex = new QCheckBox("正则"), *sensitive = new QCheckBox("区分大小写");
+  QTreeWidget *tree = new QTreeWidget;
+  QPushButton *apply = new QPushButton("应用勾选的替换"), *cancel = new QPushButton("取消预览");
+  QLabel *status = new QLabel;
+  QList<QWidget *> inputs;
+  QList<QPair<QJsonObject, QJsonArray>> pending;
+  QStringList failures;
+  int written = 0, planned = 0;
+  void reset() {
+    job.cancel();
+    tree->clear();
+    status->clear();
+    cancel->setEnabled(false);
+    apply->setEnabled(false);
+  }
+  void preview() {
+    reset();
+    if (root->text().trimmed().isEmpty() || !QDir(root->text()).exists() || query->text().isEmpty()) {
+      status->setText("请选择文件夹并输入查找内容。");
+      return;
+    }
+    auto cache = std::make_shared<QTemporaryDir>();
+    QJsonObject request{{"op", "replace-preview"}, {"root", QDir(root->text()).absolutePath()},
+                        {"glob", glob->text().isEmpty() ? "*" : glob->text()},
+                        {"query", query->text()}, {"replacement", value->text()},
+                        {"case", sensitive->isChecked()}, {"regex", regex->isChecked()}};
+    status->setText("正在生成预览…");
+    cancel->setEnabled(true);
+    job.run(cache, request, [this](const QJsonObject &answer) {
+      cancel->setEnabled(false);
+      if (answer.contains("error")) {
+        status->setText(answer["error"].toString());
+        return;
+      }
+      for (const auto &item : answer["preview"].toArray()) {
+        auto file = item.toObject();
+        auto *parent = new QTreeWidgetItem(tree, {file["relative"].toString()});
+        parent->setFlags(parent->flags() | Qt::ItemIsAutoTristate | Qt::ItemIsUserCheckable);
+        parent->setToolTip(0, file["path"].toString());
+        const auto matches = file.take("matches").toArray();
+        parent->setData(0, Qt::UserRole, file);
+        for (const auto &m : matches) {
+          const auto row = m.toObject();
+          auto excerpt = [&](QString s) {
+            if (s.size() > 120) s = s.left(80) + QStringLiteral("…") + s.right(38);
+            s.replace('\r', QStringLiteral("␍")).replace('\n', QStringLiteral("␊"));
+            return row["prefix"].toString() + QStringLiteral("⟦") + s +
+                QStringLiteral("⟧") + row["suffix"].toString();
+          };
+          auto *child = new QTreeWidgetItem(parent, {
+              QString("行 %1").arg(row["line"].toInt()), excerpt(row["before"].toString()),
+              excerpt(row["after"].toString())});
+          child->setToolTip(1, child->text(1).toHtmlEscaped());
+          child->setToolTip(2, child->text(2).toHtmlEscaped());
+          child->setCheckState(0, Qt::Checked);
+          child->setData(0, Qt::UserRole, row);
+        }
+        parent->setExpanded(true);
+      }
+      apply->setEnabled(tree->topLevelItemCount() > 0);
+      status->setText(QString("%1 个文件，%2 处替换。跳过 %3 个无法读取的文件。")
+        .arg(tree->topLevelItemCount()).arg(answer["count"].toInteger()).arg(answer["skipped"].toInt()));
+    });
+  }
+  void writeSelection() {
+    QList<QPair<QJsonObject, QJsonArray>> selected;
+    int total = 0;
+    for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+      auto *file = tree->topLevelItem(i);
+      QJsonArray matches;
+      for (int j = 0; j < file->childCount(); ++j) {
+        auto *row = file->child(j);
+        if (row->checkState(0) == Qt::Checked)
+          matches.append(row->data(0, Qt::UserRole).toJsonObject());
+      }
+      if (!matches.isEmpty()) {
+        selected.append({file->data(0, Qt::UserRole).toJsonObject(), matches});
+        total += matches.size();
+      }
+    }
+    if (selected.isEmpty()) {
+      status->setText("请先勾选要应用的替换。");
+      return;
+    }
+    if (QMessageBox::question(this, "确认批量替换",
+        QString("将 %1 处替换写入 %2 个文件？").arg(total).arg(selected.size()),
+        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes)
+      return;
+    pending = std::move(selected);
+    planned = pending.size();
+    written = 0;
+    failures.clear();
+    for (auto *input : inputs) input->setEnabled(false);
+    cancel->setText("停止写入");
+    cancel->setEnabled(true);
+    QTimer::singleShot(0, this, [this] { writeNext(); });
+  }
+  void writeNext() {
+    if (pending.isEmpty()) return;
+    auto [file, matches] = pending.takeFirst();
+    try {
+      applyBatchToTabs(tabs, file, matches);
+      ++written;
+    } catch (const std::exception &e) {
+      failures.append(file["relative"].toString() + " — " + QString::fromUtf8(e.what()));
+    }
+    status->setText(QString("已处理 %1 / %2 个文件").arg(planned - pending.size()).arg(planned));
+    if (pending.isEmpty()) finishWrite();
+    else QTimer::singleShot(0, this, [this] { writeNext(); });
+  }
+  void finishWrite() {
+    const auto remaining = pending.size();
+    pending.clear();
+    for (auto *input : inputs) input->setEnabled(true);
+    cancel->setText("取消预览");
+    reset();
+    status->setText(QString("已写入 %1 个文件，跳过 %2 个，未处理 %3 个。")
+        .arg(written).arg(failures.size()).arg(remaining));
+    if (!failures.isEmpty()) {
+      QMessageBox detail(QMessageBox::Warning, "批量替换", status->text(), QMessageBox::Ok, this);
+      detail.setDetailedText(failures.join('\n'));
+      detail.exec();
+    }
+  }
+public:
+  BatchReplace(QMainWindow *w, QTabWidget *t) : QDialog(w), tabs(t) {
+    setAttribute(Qt::WA_DeleteOnClose);
+    setWindowTitle("在文件夹中替换");
+    resize(800, 540);
+    QString initial = w->property("projectRoot").toString();
+    if (initial.isEmpty() && !filePath(tabs->currentWidget()).isEmpty())
+      initial = QFileInfo(filePath(tabs->currentWidget())).absolutePath();
+    root->setText(initial);
+    auto *v = new QVBoxLayout(this);
+    auto *form = new QFormLayout;
+    auto *folder = new QHBoxLayout;
+    auto *browse = new QPushButton("选择文件夹…");
+    folder->addWidget(root);
+    folder->addWidget(browse);
+    form->addRow("文件夹", folder);
+    form->addRow("文件匹配", glob);
+    form->addRow("查找内容", query);
+    form->addRow("替换为", value);
+    v->addLayout(form);
+    auto *options = new QHBoxLayout;
+    options->addWidget(sensitive);
+    options->addWidget(regex);
+    options->addStretch();
+    auto *go = new QPushButton("预览替换");
+    options->addWidget(go);
+    options->addWidget(cancel);
+    v->addLayout(options);
+    tree->setHeaderLabels({"文件 / 行", "替换前", "替换后"});
+    tree->header()->setSectionResizeMode(QHeaderView::Interactive);
+    tree->setColumnWidth(0, 300);
+    tree->setColumnWidth(1, 193);
+    tree->setUniformRowHeights(true);
+    v->addWidget(tree, 1);
+    auto *actions = new QHBoxLayout;
+    actions->addWidget(status, 1);
+    actions->addWidget(apply);
+    v->addLayout(actions);
+    connect(browse, &QPushButton::clicked, this, [this] {
+      auto dir = QFileDialog::getExistingDirectory(this, "选择文件夹", root->text());
+      if (!dir.isEmpty()) root->setText(dir);
+    });
+    for (auto *field : {root, glob, query, value})
+      connect(field, &QLineEdit::textChanged, this, [this] { reset(); });
+    for (auto *option : {regex, sensitive})
+      connect(option, &QCheckBox::toggled, this, [this] { reset(); });
+    connect(go, &QPushButton::clicked, this, [this] { preview(); });
+    inputs = {browse, root, glob, query, value, regex, sensitive, go, tree, apply};
+    connect(cancel, &QPushButton::clicked, this, [this] {
+      if (!pending.isEmpty()) { finishWrite(); return; }
+      reset();
+      status->setText("预览已取消");
+    });
+    connect(apply, &QPushButton::clicked, this, [this] { writeSelection(); });
+    go->setDefault(true);
+    reset();
+    query->setFocus();
+  }
+};
+
 struct DiffLine {
   int left, right;
   bool changed;
@@ -786,6 +976,9 @@ void installSearchTools(QMainWindow *window, QMenu *menu, QTabWidget *tabs,
   });
   add("按文件名快速打开…", QKeySequence("Ctrl+P"), [=] {
     (new Folder(window, tabs, true, openFile, jumpToByte, openLog))->show();
+  });
+  add("在文件夹中替换…", QKeySequence("Ctrl+Shift+H"), [=] {
+    (new BatchReplace(window, tabs))->show();
   });
   add("与另一文件对比…", {}, [=] { compare(window, tabs, false); }, true);
   add("与磁盘版本对比…", {}, [=] { compare(window, tabs, true); }, true);

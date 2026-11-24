@@ -1,5 +1,7 @@
 #include "appearance.h"
+#include "workspacefiles.h"
 #include "codetools.h"
+#include "configtools.h"
 #include "editcommands.h"
 #include "editor.h"
 #include "logscan.h"
@@ -55,6 +57,35 @@ class Window final : public QMainWindow {
       }
     }
     folderTree->selectionModel()->clear();
+  }
+  void workspacePathMoved(const QString &from, const QString &to) {
+    auto rebase = [&](const QString &path) { return WorkspaceFiles::relocated(path, from, to); };
+    for (int i = 0; i < tabs->count(); ++i) {
+      auto *tab = tabs->widget(i);
+      auto old = pathOf(tab), path = rebase(old);
+      if (old == path) continue;
+      if (disk.files().contains(old)) disk.removePath(old);
+      diskChanges.remove(old);
+      if (auto *editor = dynamic_cast<Edit *>(tab)) {
+        editor->doc.path = path;
+        editor->applyLanguage();
+        watch(path);
+        tabs->setTabText(i, QFileInfo(path).fileName() + (editor->dirty() ? " *" : ""));
+      } else if (auto *log = dynamic_cast<Log *>(tab)) {
+        log->relocateFile(path);
+        tabs->setTabText(i, QFileInfo(path).fileName());
+      }
+      tabs->setTabToolTip(i, QDir::toNativeSeparators(path));
+    }
+    QSettings settings;
+    auto paths = settings.value("recentFiles").toStringList();
+    for (auto &path : paths) path = rebase(path);
+    paths.removeDuplicates();
+    settings.setValue("recentFiles", paths);
+    for (auto &entry : closed) entry.first = rebase(entry.first);
+    changed();
+    refresh();
+    revealActiveFile();
   }
   void setWorkspaceFolder(const QString &path) {
     QFileInfo folder(path);
@@ -646,7 +677,77 @@ public:
       if (auto *e = edit())
         e->autoCompleteFromAll();
     });
-    installEditCommands(this, m, tabs);
+    auto configAction = [&](const QString &title, const QString &id, bool pretty) {
+      auto *action = m->addAction(title, this, [this, pretty] {
+        auto *e = edit();
+        const auto ext = e ? (e->language.isEmpty() ? QFileInfo(e->doc.path).suffix().toLower() : e->language) : QString();
+        ConfigTools::Format format;
+        if (ext == "json") format = ConfigTools::Format::Json;
+        else if (ext == "yaml" || ext == "yml") format = ConfigTools::Format::Yaml;
+        else if (ext == "toml") format = ConfigTools::Format::Toml;
+        else {
+          statusBar()->showMessage("请打开 JSON、YAML 或 TOML 文件，或在状态栏选择对应语言", 6000);
+          return;
+        }
+        if (pretty && e->isReadOnly()) {
+          statusBar()->showMessage("当前文档为只读", 4000);
+          return;
+        }
+        if (e->property("configBusy").toBool()) {
+          statusBar()->showMessage("正在处理当前配置", 3000);
+          return;
+        }
+        e->setProperty("configBusy", true);
+        const auto source = e->text();
+        auto *watcher = new QFutureWatcher<ConfigTools::Result>(e);
+        connect(e, &QsciScintilla::textChanged, watcher, [watcher] {
+          watcher->setProperty("stale", true);
+        });
+        statusBar()->showMessage(pretty ? "正在格式化配置…" : "正在校验配置语法…", 4000);
+        connect(watcher, &QFutureWatcher<ConfigTools::Result>::finished, this,
+                [this, e, watcher, source, pretty, ext] {
+          watcher->deleteLater();
+          e->setProperty("configBusy", false);
+          if (edit() != e) return;
+          const auto currentExt = e->language.isEmpty() ? QFileInfo(e->doc.path).suffix().toLower() : e->language;
+          if (watcher->property("stale").toBool() || currentExt != ext || (pretty && e->isReadOnly())) {
+            statusBar()->showMessage("文档已更改，请重新运行配置命令", 5000);
+            return;
+          }
+          const auto result = watcher->result();
+          if (!result.valid() && result.line == 0) {
+            statusBar()->showMessage(result.error, 6000);
+            return;
+          }
+          if (!result.valid()) {
+            const auto row = qBound(0, result.line - 1, qMax(0, e->lines() - 1));
+            const auto col = qBound(0, result.column - 1, int(e->text(row).toUcs4().size()));
+            e->setCursorPosition(row, col);
+            e->ensureCursorVisible();
+            e->setFocus();
+            statusBar()->showMessage(QString("第 %1 行，第 %2 列：%3").arg(result.line).arg(result.column).arg(result.error));
+          } else if (pretty && result.text != source) {
+            int line, column;
+            e->getCursorPosition(&line, &column);
+            e->beginUndoAction();
+            e->selectAll();
+            e->replaceSelectedText(result.text);
+            e->endUndoAction();
+            e->setCursorPosition(qMin(line, e->lines() - 1), column);
+            statusBar()->showMessage("配置已格式化", 5000);
+          } else {
+            statusBar()->showMessage(pretty ? "配置已符合格式" : "配置语法正确", 5000);
+          }
+        });
+        watcher->setFuture(QtConcurrent::run([format, source, pretty] {
+          return ConfigTools::process(format, source, pretty);
+        }));
+      });
+      action->setObjectName(id);
+    };
+    configAction("校验配置语法", "validateConfig", false);
+    configAction("格式化配置", "formatConfig", true);
+    installEditCommands(this, m, tabs, [this](Edit *doc) { save(doc, false); });
     installCodeTools(this, tabs, openPath);
     auto *rail = new QWidget;
     rail->setObjectName("workspaceRail");
@@ -686,6 +787,8 @@ public:
       const auto file = folderModel->fileInfo(index);
       if (file.isFile()) open(file.absoluteFilePath());
     });
+    WorkspaceFiles::install(folderTree, folderModel, [this](QString path) { open(path); },
+                            [this](QString from, QString to) { workspacePathMoved(from, to); });
     column->addWidget(folderTree);
     column->setStretchFactor(folderTree, 1);
     connect(folderModel, &QFileSystemModel::directoryLoaded, this, [this](const QString &dir) {
