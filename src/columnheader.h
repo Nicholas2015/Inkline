@@ -25,13 +25,13 @@ public:
 protected:
   void paintEvent(QPaintEvent *) override {
     QPainter p(this);
-    p.fillRect(rect(), QColor("#f6f7f7"));
-    p.setPen(QColor("#535e63"));
+    p.fillRect(rect(), QColor("#faf9f6"));
+    p.setPen(QColor("#52524d"));
     p.drawText(QRect(0, 0, gutter - 7, height()),
                Qt::AlignRight | Qt::AlignVCenter, "行号");
     p.drawText(rect().adjusted(gutter + 8, 0, 0, 0),
                Qt::AlignLeft | Qt::AlignVCenter, caption);
-    p.setPen(QColor("#d4d9db"));
+    p.setPen(QColor("#e3e1da"));
     p.drawLine(gutter - 1, 0, gutter - 1, height());
     p.drawLine(0, height() - 1, width(), height() - 1);
   }

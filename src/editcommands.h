@@ -117,7 +117,12 @@ inline void openSplitReader(QMainWindow *window, QTabWidget *tabs) {
     split->addWidget(panel);
     auto *column = new QVBoxLayout(panel);
     auto *picker = new QComboBox;
-    column->addWidget(picker);
+    auto *header = new QHBoxLayout;
+    auto *label = new QLabel(side ? "右侧文档" : "左侧文档");
+    label->setBuddy(picker);
+    header->addWidget(label);
+    header->addWidget(picker, 1);
+    column->addLayout(header);
     for (int i = 0; i < tabs->count(); ++i)
       picker->addItem(tabs->tabText(i));
     auto display = [column, tabs](int index) {

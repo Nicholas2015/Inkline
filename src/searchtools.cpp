@@ -107,7 +107,7 @@ class Results : public QWidget {
     prev->setEnabled(page > 0);
     next->setEnabled((page + 1) * 512 < count);
     position->setText(
-        count ? QString("%1 / %2").arg(page + 1).arg((count + 511) / 512)
+        count ? QString("第 %1 / %2 页").arg(page + 1).arg((count + 511) / 512)
               : QString());
   }
 
@@ -117,6 +117,8 @@ public:
     auto *v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
     v->addWidget(rows);
+    rows->setAlternatingRowColors(true);
+    rows->setAccessibleName("搜索结果");
     rows->setUniformItemSizes(true);
     auto *h = new QHBoxLayout;
     h->addWidget(prev);
@@ -186,18 +188,25 @@ public:
     setMinimumWidth(488);
     auto *v = new QVBoxLayout(this);
     auto *h = new QHBoxLayout;
-    v->setContentsMargins(16, 16, 16, 12);
+    v->setContentsMargins(20, 16, 20, 16);
     v->setSpacing(12);
     field->setEditable(true);
     field->setInsertPolicy(QComboBox::NoInsert);
     field->addItems(QSettings().value("find/history").toStringList());
     field->setEditText("");
     field->lineEdit()->setPlaceholderText("查找文本");
+    auto *findLabel = new QLabel("查找内容");
+    findLabel->setBuddy(field);
+    h->addWidget(findLabel);
     h->addWidget(field, 1);
     h->addWidget(mode);
     v->addLayout(h);
     replacement->setPlaceholderText("替换为");
     auto *replaceRow = new QHBoxLayout;
+    auto *replaceLabel = new QLabel("替换为");
+    replaceLabel->setMinimumWidth(findLabel->sizeHint().width());
+    replaceLabel->setBuddy(replacement);
+    replaceRow->addWidget(replaceLabel);
     replaceRow->addWidget(replacement,1);
     v->addLayout(replaceRow);
     h = new QHBoxLayout;
@@ -216,7 +225,7 @@ public:
     auto *actions = h;
     h = replaceRow;
     auto *one = button("替换", "replace"), *all = button("全部替换", "all");
-    for (QWidget *w : QList<QWidget *>{one, all, replacement}) {
+    for (QWidget *w : QList<QWidget *>{one, all, replacement, replaceLabel}) {
       w->hide();
       connect(mode, &QCheckBox::toggled, w, &QWidget::setVisible);
     }
@@ -242,7 +251,7 @@ public:
     h->addWidget(cancel);
     v->addLayout(h);
     status->setProperty("secondary", true);
-    v->addWidget(results);
+    v->insertWidget(v->count() - 2, results, 1);
     results->hide();
     connect(cancel, &QPushButton::clicked, this, [this] {
       job.cancel();
@@ -473,41 +482,52 @@ public:
       initial = QFileInfo(filePath(t->currentWidget())).absolutePath();
     root->setText(initial);
     auto *v = new QVBoxLayout(this);
-    auto *h = new QHBoxLayout;
+    auto *body = new QHBoxLayout;
+    auto *conditions = new QVBoxLayout;
+    auto *output = new QVBoxLayout;
+    body->setSpacing(18);
+    body->addLayout(conditions, 2);
+    body->addLayout(output, 3);
+    v->addLayout(body, 1);
+    auto field = [&](QString title, QWidget *input) {
+      auto *label = new QLabel(title);
+      label->setBuddy(input);
+      conditions->addWidget(label);
+      conditions->addWidget(input);
+    };
+    field("文件夹", root);
     auto *browse = new QPushButton("选择文件夹…");
     browse->setAutoDefault(false);
-    h->addWidget(root, 1);
-    h->addWidget(browse);
-    codec->addItems({"UTF-8", "GBK"});
-    h->addWidget(files);
-    h->addWidget(codec);
+    auto *sources = new QHBoxLayout;
+    sources->addWidget(browse);
+    sources->addWidget(files);
+    conditions->addLayout(sources);
     files->setVisible(!names);
-    codec->setVisible(!names);
     files->setAutoDefault(false);
-    v->addLayout(h);
-    h = new QHBoxLayout;
-    v->setContentsMargins(16, 16, 16, 12);
-    v->setSpacing(12);
+    codec->addItems({"UTF-8", "GBK"});
+    if (!names) field("文件编码", codec);
+    else { codec->setParent(this); codec->hide(); }
+    query->setPlaceholderText(names ? "文件名或相对路径的一部分" : "要在文件内容中查找的文字");
+    field(names ? "文件名" : "查找内容", query);
+    field("文件匹配", glob);
+    conditions->addWidget(regex);
+    conditions->addWidget(sensitive);
+    conditions->addStretch();
+    auto *actions = new QHBoxLayout;
     auto *go = new QPushButton("搜索");
     go->setProperty("primary", true);
     go->setDefault(true);
-    query->setPlaceholderText(names ? "文件名或相对路径的一部分"
-                                    : "要在文件内容中查找的文字");
-    h->addWidget(query, 1);
-    h->addWidget(go);
-    h->addWidget(cancel);
     cancel->setEnabled(false);
-    v->addLayout(h);
-    h = new QHBoxLayout;
-    h->addWidget(new QLabel("文件匹配"));
-    h->addWidget(glob);
-    h->addWidget(regex);
-    h->addWidget(sensitive);
-    h->addStretch();
-    v->addLayout(h);
-    v->addWidget(results);
+    actions->addWidget(go);
+    actions->addWidget(cancel);
+    conditions->addLayout(actions);
+    auto *heading = new QLabel("匹配结果");
+    heading->setProperty("section", true);
+    output->addWidget(heading);
+    output->addWidget(results, 1);
     results->reset();
-    v->addWidget(status);
+    output->addWidget(status);
+    query->setFocus();
     connect(root, &QLineEdit::textEdited, this, [this] {
       selected.clear();
       files->setText("选择多个日志…");
@@ -659,10 +679,14 @@ void compare(QMainWindow *window, QTabWidget *tabs, bool disk) {
     dialog.setWindowTitle("文件差异");
     dialog.resize(960, 620);
     auto *v = new QVBoxLayout(&dialog);
-    v->addWidget(
-        new QLabel("当前编辑内容  ↔  " + path + "（" + other.codec + "）"));
+    auto *source = new QLabel(QDir::toNativeSeparators(path) + "（" + other.codec + "）");
+    source->setWordWrap(true);
+    source->setTextFormat(Qt::PlainText);
+    source->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    source->setProperty("secondary", true);
     auto *table = new QTableWidget(0, 2);
-    v->addWidget(table);
+    v->addWidget(table, 1);
+    v->addWidget(source);
     table->setHorizontalHeaderLabels(
         {tabs->tabText(tabs->currentIndex()), QFileInfo(path).fileName()});
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
@@ -670,6 +694,9 @@ void compare(QMainWindow *window, QTabWidget *tabs, bool disk) {
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     table->setWordWrap(false);
+    table->setShowGrid(false);
+    table->setAlternatingRowColors(true);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
     auto cell = [](int idx, const QStringList &text) {
       if (idx < 0)
         return QString();

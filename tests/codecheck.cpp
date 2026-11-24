@@ -1,4 +1,5 @@
 #include "../src/codetools.h"
+#include "../src/editor.h"
 #include "../src/pythonindex.h"
 #include <Qsci/qscilexerpython.h>
 #include <Qsci/qsciscintilla.h>
@@ -261,7 +262,7 @@ int main(int argc, char **argv) {
   check.expect(settings.open(QIODevice::ReadOnly), "settings accessible");
   check.expect(!settings.readAll().contains("test-session-key"),
                "key not persisted");
-  auto toggle = action(w, "为当前标签启用行内续写");
+  auto toggle = action(w, "输入时显示 AI 灰字补全");
   delayResponse = false;
   received = false;
   e->setText("prefix");
@@ -286,6 +287,46 @@ int main(int argc, char **argv) {
   QApplication::sendEvent(e, &tabKey);
   check.expect(e->text() == "prefixcode_result",
                "Tab accepts inline suggestion");
+  auto *second = new QsciScintilla;
+  second->setLexer(new QsciLexerPython(second));
+  tabs->addTab(second, "another.py");
+  tabs->setCurrentWidget(second);
+  second->setFocus();
+  second->setText("other");
+  second->SendScintilla(QsciScintilla::SCI_GOTOPOS, 5);
+  check.expect(until([&] {
+    for (auto *label : second->findChildren<QLabel *>())
+      if (label->isVisible() && label->text() == "code_result") return true;
+    return false;
+  }), "new code tab inherits inline completion");
+  QKeyEvent escapeKey(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+  QApplication::sendEvent(second, &escapeKey);
+  check.expect(second->text() == "other", "Escape leaves code untouched");
+  // Use the same extension detection and editor widget as newly opened files.
+  for (const auto &language : editorLanguages()) {
+    if (language.extensions.contains("log")) continue;
+    Document doc;
+    doc.path = "completion." + language.extensions.first();
+    auto *sample = new Edit(doc);
+    tabs->addTab(sample, doc.path);
+    tabs->setCurrentWidget(sample);
+    sample->setFocus();
+    sample->setText("prefix");
+    sample->SendScintilla(QsciScintilla::SCI_GOTOPOS, 6);
+    const bool shown = until([&] {
+      for (auto *label : sample->findChildren<QLabel *>())
+        if (label->isVisible() && label->text() == "code_result") return true;
+      return false;
+    });
+    const bool correctLanguage = sample->lexer() &&
+        request.contains(QString("当前语言：%1。").arg(QString::fromUtf8(sample->lexer()->language())).toUtf8());
+    QKeyEvent accept(QEvent::KeyPress, Qt::Key_Tab, Qt::NoModifier);
+    const bool untouched = sample->text() == "prefix";
+    QApplication::sendEvent(sample, &accept);
+    check.expect(shown && correctLanguage && untouched && sample->text() == "prefixcode_result",
+                 qPrintable(language.title + " inline preview and Tab"));
+    if (!shown) break;
+  }
   toggle->trigger();
   if (check.ok)
     qInfo() << "PASS native index, mock stdio LSP and HTTP AI integration";

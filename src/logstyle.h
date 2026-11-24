@@ -8,19 +8,19 @@ enum Token { Text, Time, Debug, Info, Warn, Error, Source, Key, Function };
 inline QColor ink(int token) {
   static const std::array<QColor, 9> colors = {"#292e31", "#536571", "#542194",
                                                "#005640", "#703c00", "#91162f",
-                                               "#285e89", "#536476", "#064caa"};
+                                               "#475b67", "#536476", "#164e76"};
   return colors.at(token);
 }
 inline QColor levelBackground(int token) {
   switch (token) {
   case Debug:
-    return QColor("#e6d4ff");
+    return QColor("#ebe0f7");
   case Info:
-    return QColor("#bee9d8");
+    return QColor("#d4ecdf");
   case Warn:
     return QColor("#ffdc88");
   case Error:
-    return QColor("#ffbdc7");
+    return QColor("#ffb7c2");
   default:
     return {};
   }

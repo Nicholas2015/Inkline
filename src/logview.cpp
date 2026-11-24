@@ -1,5 +1,7 @@
 #include "numberedlogpage.h"
 #include "logstyle.h"
+#include "logfields.h"
+#include <QTimeEdit>
 #include "logview.h"
 #include "appearance.h"
 #include "document.h"
@@ -86,6 +88,9 @@ struct Log::State {
   QComboBox *mode = new QComboBox, *terms = new QComboBox;
   QCheckBox *regex = new QCheckBox("正则"),
             *sensitive = new QCheckBox("区分大小写");
+  QCheckBox *timeRange = new QCheckBox("限定时段");
+  QTimeEdit *fromTime = new QTimeEdit(QTime(0, 0)), *toTime = new QTimeEdit(QTime(23, 59, 59));
+  QLabel *untilLabel = new QLabel("至");
   QLabel *status = new QLabel;
   QListWidget *hits = new QListWidget;
   QProcess *job = nullptr;
@@ -306,6 +311,12 @@ struct Log::State {
     filterActive = false;
     regex->setEnabled(mode->currentIndex() == 1);
     sensitive->setEnabled(mode->currentIndex() == 1);
+    const bool filtering = mode->currentIndex() != 0;
+    timeRange->setVisible(filtering);
+    fromTime->setVisible(filtering && timeRange->isChecked());
+    untilLabel->setVisible(filtering && timeRange->isChecked());
+    toTime->setVisible(filtering && timeRange->isChecked());
+    terms->lineEdit()->setPlaceholderText(mode->currentIndex() == 2 ? "输入完整的 session_id" : "输入日志中的文字");
     status->clear();
     updateControls();
   }
@@ -353,15 +364,18 @@ struct Log::State {
       search(resume, true);
   }
   QJsonObject request(QString kind) const {
-    const bool filter = mode->currentIndex() == 1;
+    const bool filter = mode->currentIndex() != 0;
     return {{"kind", kind},
             {"path", path},
             {"codec", codec->currentText()},
             {"size", QFileInfo(path).size()},
             {"query", terms->currentText()},
             {"filter", filter},
+            {"session", mode->currentIndex() == 2},
+            {"fromSecond", filter && timeRange->isChecked() ? fromTime->time().msecsSinceStartOfDay() / 1000 : -1},
+            {"toSecond", filter && timeRange->isChecked() ? toTime->time().msecsSinceStartOfDay() / 1000 : -1},
             {"regex", filter && regex->isChecked()},
-            {"case", !filter || sensitive->isChecked()}};
+            {"case", mode->currentIndex() != 1 || sensitive->isChecked()}};
   }
   void launch(QJsonObject req, std::function<void(QJsonObject)> done) {
     cancel();
@@ -419,7 +433,7 @@ struct Log::State {
     snapshotSize = info.size();
     snapshotTime = info.lastModified();
     snapshotBirth = info.birthTime();
-    filterActive = mode->currentIndex() == 1;
+    filterActive = mode->currentIndex() != 0;
     QString term = terms->currentText();
     auto history = QSettings().value("log/history").toStringList();
     history.removeAll(term);
@@ -447,7 +461,7 @@ struct Log::State {
       for (auto v : r["hits"].toArray()) {
         auto h = v.toArray();
         auto *item = new QListWidgetItem(
-            QString("%1   %2").arg(h[0].toInteger()).arg(h[2].toString()),
+            QString("字节 %1    %2").arg(h[0].toInteger()).arg(h[2].toString()),
             hits);
         item->setData(Qt::UserRole, h[0].toInteger());
         item->setData(Qt::UserRole + 1, h[1].toInteger());
@@ -565,33 +579,59 @@ Log::Log(const QString &file) : d(std::make_unique<State>(this, file)) {
   s.dialog->setWindowTitle("日志检索 — " + QFileInfo(s.path).fileName());
   s.dialog->resize(700, 420);
   auto *panel = new QVBoxLayout(s.dialog);
-  panel->setContentsMargins(16,16,16,12);
-  panel->setSpacing(8);
-  auto *row = new QHBoxLayout;
-  panel->addLayout(row);
-  s.mode->addItems({"查找文字", "筛选匹配行"});
+  panel->setContentsMargins(20,16,20,16);
+  panel->setSpacing(12);
+  auto *body = new QHBoxLayout;
+  panel->addLayout(body, 1);
+  auto *conditions = new QVBoxLayout;
+  auto *output = new QVBoxLayout;
+  body->setSpacing(16);
+  body->addLayout(conditions, 2);
+  body->addLayout(output, 3);
+  auto *row = conditions;
+  auto *heading = new QLabel("匹配结果");
+  heading->setProperty("section", true);
+  output->addWidget(heading);
+  s.mode->addItems({"查找文字", "筛选匹配行", "筛选会话"});
   s.terms->setEditable(true);
   s.terms->setInsertPolicy(QComboBox::NoInsert);
   s.terms->addItems(QSettings().value("log/history").toStringList());
   s.terms->setEditText({});
   s.terms->lineEdit()->setMaxLength(4096);
   row->addWidget(s.mode);
-  row->addWidget(s.terms, 1);
-  auto *filters = new QHBoxLayout;
-  filters->addWidget(s.regex);filters->addWidget(s.sensitive);filters->addStretch();
-  panel->addLayout(filters);
+  row->addWidget(s.terms);
+  auto *filters = new QVBoxLayout;
+  filters->addWidget(s.regex);filters->addWidget(s.sensitive);filters->addWidget(s.timeRange);
+  for (auto *edit : {s.fromTime, s.toTime}) {
+    edit->setDisplayFormat("HH:mm:ss");
+    edit->setToolTip(edit == s.fromTime ? "起始时间（含）" : "结束时间（含，可跨午夜）");
+    if (edit == s.toTime)
+      filters->addWidget(s.untilLabel);
+    edit->setAccessibleName(edit == s.fromTime ? "起始时间" : "结束时间");
+    filters->addWidget(edit);
+    connect(edit, &QTimeEdit::timeChanged, this, [this] { d->reset(); });
+  }
+  connect(s.timeRange, &QCheckBox::toggled, this, [this] { d->reset(); });
+  filters->addStretch();
+  conditions->addLayout(filters, 1);
   s.sensitive->setChecked(true);
-  s.go = button(row, "查找");
+  auto *commands = new QHBoxLayout;
+  conditions->addLayout(commands);
+  s.go = button(commands, "查找");
   s.go->setProperty("primary", true);
   s.terms->lineEdit()->setPlaceholderText("输入日志中的文字");
-  s.stop = button(row, "取消");
+  s.stop = button(commands, "取消");
   s.hits->setObjectName("logMatches");
-  panel->addWidget(s.hits, 1);
+  s.hits->setAccessibleName("日志匹配结果");
+  s.hits->setAlternatingRowColors(true);
+  s.hits->setFont(Appearance::codeFont());
+  output->addWidget(s.hits, 1);
   auto *nav = new QHBoxLayout;
-  nav->addWidget(s.status, 1);
+  output->addWidget(s.status);
+  nav->addStretch();
   auto *back = button(nav, "上一处"), *forward = button(nav, "下一处");
   s.more = button(nav, "继续扫描");
-  panel->addLayout(nav);
+  output->addLayout(nav);
   auto *exports = new QHBoxLayout;
   exports->addStretch();
   auto *copy = button(exports, "复制本批匹配行"),
@@ -614,21 +654,45 @@ Log::Log(const QString &file) : d(std::make_unique<State>(this, file)) {
     if (d->continuation >= 0)
       d->search(d->continuation);
   });
-  connect(s.hits, &QListWidget::currentItemChanged, this,
-          [this](QListWidgetItem *h) {
+  auto locate = [this](QListWidgetItem *h) {
             if (!h)
-              return;
+              return false;
             QFileInfo info(d->path);
             if (info.birthTime() != d->snapshotBirth ||
                 info.size() < d->snapshotSize ||
                 (info.size() == d->snapshotSize &&
                  info.lastModified() != d->snapshotTime)) {
               d->status->setText("日志已变化，请重新搜索");
-              return;
+              return false;
             }
             d->visit(h->data(Qt::UserRole).toLongLong(),
                      h->data(Qt::UserRole + 1).toLongLong());
-          });
+    return true;
+  };
+  connect(s.hits, &QListWidget::currentItemChanged, this, locate);
+  s.hits->setToolTip("双击或按回车，在原日志中查看");
+  connect(s.hits, &QListWidget::itemActivated, this, [this, locate](QListWidgetItem *item) {
+    if (locate(item)) {
+      d->dialog->accept();
+      d->view->setFocus();
+    }
+  });
+  s.view->setContextMenuPolicy(Qt::CustomContextMenu);
+  connect(s.view, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+    auto cursor = d->view->cursorForPosition(pos);
+    QString id = sessionAt(cursor.block().text(), cursor.positionInBlock());
+    std::unique_ptr<QMenu> menu(d->view->createStandardContextMenu());
+    if (!id.isEmpty()) {
+      menu->addSeparator();
+      menu->addAction("只看此会话", this, [this, id] {
+        d->mode->setCurrentIndex(2);
+        d->terms->setEditText(id);
+        showSearch();
+        d->search();
+      });
+    }
+    menu->exec(d->view->viewport()->mapToGlobal(pos));
+  });
   connect(s.go, &QPushButton::clicked, this, [this] { d->search(); });
   connect(s.stop, &QPushButton::clicked, this, [this] { d->cancel(); });
   connect(s.dialog, &QDialog::finished, this, [this] { d->cancel(); });

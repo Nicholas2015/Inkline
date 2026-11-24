@@ -1,5 +1,12 @@
 #include "columnheader.h"
 #include "loglexer.h"
+#include "languagelexers.h"
+#include <Qsci/qscilexerruby.h>
+#include <Qsci/qscilexerlua.h>
+#include <Qsci/qscilexercmake.h>
+#include <Qsci/qscilexermakefile.h>
+#include <Qsci/qscilexerdiff.h>
+#include <Qsci/qscilexerbatch.h>
 #pragma once
 #include "appearance.h"
 #include "document.h"
@@ -56,20 +63,32 @@ template <class Lexer> QsciLexer *createLexer(QObject *parent) {
 inline const QList<EditorLanguage> &editorLanguages() {
   static const QList<EditorLanguage> languages = {
       {"日志", {"log", "trace"}, createLexer<LogLexer>},
-      {"Python", {"py", "pyw"}, createLexer<QsciLexerPython>},
-      {"C / C++",
-       {"cpp", "c", "h", "cc", "cxx", "hpp", "hh", "ino"},
+      {"Python", {"py", "pyw", "pyi"}, createLexer<QsciLexerPython>},
+      {"C", {"c"}, createLexer<CLexer>},
+      {"C++",
+       {"cpp", "h", "hxx", "ipp", "tpp", "cc", "cxx", "hpp", "hh", "ino"},
        createLexer<QsciLexerCPP>},
+      {"Go", {"go"}, [](QObject *p) -> QsciLexer * { return new BracedLexer(p, true); }},
+      {"Zig", {"zig", "zon"}, [](QObject *p) -> QsciLexer * { return new BracedLexer(p, false); }},
+      {"Rust", {"rs"}, createLexer<RustLexer>},
+      {"TOML", {"toml"}, createLexer<TomlLexer>},
+      {"Conf", {"conf"}, createLexer<ConfLexer>},
+      {"Ruby", {"rb"}, createLexer<QsciLexerRuby>},
+      {"Lua", {"lua"}, createLexer<QsciLexerLua>},
+      {"CMake", {"cmake"}, createLexer<QsciLexerCMake>},
+      {"Makefile", {"mk", "mak"}, createLexer<QsciLexerMakefile>},
+      {"Diff", {"diff", "patch"}, createLexer<QsciLexerDiff>},
+      {"Batch", {"bat", "cmd"}, createLexer<QsciLexerBatch>},
       {"JavaScript",
        {"js", "jsx", "mjs", "cjs"},
        createLexer<QsciLexerJavaScript>},
       {"Java", {"java"}, createLexer<QsciLexerJava>},
       {"C#", {"cs"}, createLexer<QsciLexerCSharp>},
       {"Bash", {"sh", "bash", "zsh"}, createLexer<QsciLexerBash>},
-      {"JSON", {"json", "jsonc"}, createLexer<QsciLexerJSON>},
+      {"JSON", {"json", "jsonc", "jsonl", "ndjson"}, createLexer<QsciLexerJSON>},
       {"YAML", {"yaml", "yml"}, createLexer<QsciLexerYAML>},
       {"INI / Properties",
-       {"ini", "cfg", "conf", "properties", "env"},
+       {"ini", "cfg", "properties", "env"},
        createLexer<QsciLexerProperties>},
       {"HTML", {"html", "htm"}, createLexer<QsciLexerHTML>},
       {"XML", {"xml", "plist", "svg"}, createLexer<QsciLexerXML>},
@@ -119,7 +138,7 @@ public:
     setExtraDescent(2);
     applyLanguage();
     setMarginLineNumbers(0, true);
-    divider.setStyleSheet("background:#cdd3d5;");
+    divider.setStyleSheet("background:#e3e1da;");
     divider.setAttribute(Qt::WA_TransparentForMouseEvents);
     connect(this, &QsciScintilla::linesChanged, this,
             [this] { layoutColumns(); });
@@ -144,6 +163,17 @@ public:
             QRegularExpression(R"(\.(?:log|trace)(?:\.\d+)+$)",
                                QRegularExpression::CaseInsensitiveOption)))
       ext = "log";
+    if (language.isEmpty()) {
+      const auto filename = QFileInfo(doc.path).fileName().toLower();
+      if (filename == "cmakelists.txt") ext = "cmake";
+      else if (filename == "makefile" || filename == "gnumakefile") ext = "mk";
+      else if (filename == ".env" || filename.startsWith(".env.")) ext = "env";
+      else if (ext == "conf") {
+        static const QRegularExpression setting(QStringLiteral(R"(^\s*(?:\[[^\]\r\n]+\]|[\w.-]+\s*=))"),
+                                               QRegularExpression::MultilineOption);
+        if (setting.match(doc.text.left(8192)).hasMatch()) ext = "ini";
+      }
+    }
     QsciLexer *style = nullptr;
     for (const auto &item : editorLanguages())
       if (item.extensions.contains(ext)) {
@@ -160,10 +190,32 @@ public:
           auto c = style->defaultColor(i);
           if (!dynamic_cast<LogLexer *>(style) && c.hslSaturation() > 25)
             style->setColor(QColor::fromHsl(c.hslHue(),
-                                            qMin(76, c.hslSaturation()),
+                                            qMin(180, c.hslSaturation()),
                                             qBound(77, c.lightness(), 98)),
                             i);
         }
+      // Keep structural keys distinct from values on the white editor surface.
+      if (auto *json = dynamic_cast<QsciLexerJSON *>(style)) {
+        json->setHighlightComments(ext == "jsonc");
+        json->setColor(QColor("#185d94"), QsciLexerJSON::Property);
+        json->setColor(QColor("#236640"), QsciLexerJSON::String);
+        json->setColor(QColor("#9a5018"), QsciLexerJSON::Number);
+        json->setColor(QColor("#703fa0"), QsciLexerJSON::Keyword);
+        json->setColor(QColor("#66716c"), QsciLexerJSON::CommentLine);
+        json->setColor(QColor("#66716c"), QsciLexerJSON::CommentBlock);
+      } else if (auto *yaml = dynamic_cast<QsciLexerYAML *>(style)) {
+        yaml->setColor(QColor("#236640"), QsciLexerYAML::Default);
+        yaml->setColor(QColor("#185d94"), QsciLexerYAML::Identifier);
+        yaml->setColor(QColor("#703fa0"), QsciLexerYAML::Keyword);
+        yaml->setColor(QColor("#9a5018"), QsciLexerYAML::Number);
+        yaml->setColor(QColor("#236640"), QsciLexerYAML::Reference);
+        yaml->setColor(QColor("#66716c"), QsciLexerYAML::Comment);
+      }
+      if (auto *props = dynamic_cast<QsciLexerProperties *>(style)) {
+        props->setColor(QColor("#185d94"), QsciLexerProperties::Key);
+        props->setColor(QColor("#236640"), QsciLexerProperties::Default);
+        props->setColor(QColor("#703fa0"), QsciLexerProperties::Section);
+      }
       auto *api = new QsciAPIs(style);
       QSet<QString> words;
       for (int group : {1, 2}) {
@@ -195,10 +247,10 @@ public:
     }
     setMarginsFont(font);
     layoutColumns();
-    setMarginsBackgroundColor(QColor("#f5f6f5"));
-    setMarginsForegroundColor(QColor("#687174"));
+    setMarginsBackgroundColor(QColor("#f6f5f2"));
+    setMarginsForegroundColor(QColor("#52524d"));
     const bool logView = dynamic_cast<LogLexer *>(style) != nullptr;
-    setCaretLineBackgroundColor(QColor(logView ? "#77888e" : "#f4f6f6"));
+    setCaretLineBackgroundColor(QColor(logView ? "#77888e" : "#faf9f6"));
     SendScintilla(SCI_SETCARETLINEBACKALPHA, logView ? 16 : SC_ALPHA_NOALPHA);
     setCaretLineVisible(true);
     setSelectionBackgroundColor(QColor("#d6e2e7"));

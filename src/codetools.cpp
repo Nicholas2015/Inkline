@@ -1,6 +1,8 @@
 #include "codetools.h"
+#include <QListWidget>
 #include "appearance.h"
 #include <Qsci/qsciscintilla.h>
+#include <Qsci/qscilexer.h>
 #include <QtNetwork>
 #include <QtWidgets>
 
@@ -108,7 +110,12 @@ class Inline : public QObject {
   ModelClient *client;
   QTimer delay;
   QLabel *hint;
-  QString url, suggestion;
+  QString suggestion;
+  bool eligible() const {
+    const auto dest = endpoint();
+    return !dest.isEmpty() && QSettings().value("ai/inlineEndpoint").toString() == dest &&
+           e->lexer() && QString::fromUtf8(e->lexer()->language()) != "日志" && !e->isReadOnly();
+  }
   quint64 generation = 0;
   QPointer<QNetworkReply> pending;
   void clear() {
@@ -123,21 +130,24 @@ class Inline : public QObject {
   void request() {
     long pos = e->SendScintilla(Editor::SCI_GETCURRENTPOS);
     long line = e->SendScintilla(Editor::SCI_LINEFROMPOSITION, pos);
-    if (url.isEmpty() || url != endpoint() || !e->hasFocus() ||
+    if (!eligible() || !e->hasFocus() ||
         e->hasSelectedText() || e->isReadOnly() ||
         pos != e->SendScintilla(Editor::SCI_GETLINEENDPOSITION, line))
       return;
     auto token = generation;
     pending = client->ask(
-        this, "只返回光标后需要续写的单行代码，不重复已有前缀。",
+        this, QString("当前语言：%1。只返回光标后需要续写的单行内容，不重复已有前缀。")
+                  .arg(QString::fromUtf8(e->lexer()->language())),
         contextBefore(e, 4096),
         [this, token, pos](QString answer, QString err) {
-          if (token != generation || !err.isEmpty() || !e->hasFocus() ||
+          if (token != generation || !eligible() || !err.isEmpty() || !e->hasFocus() ||
               pos != e->SendScintilla(Editor::SCI_GETCURRENTPOS))
             return;
           suggestion = answer.section('\n', 0, 0).remove('\r');
           if (suggestion.isEmpty())
             return;
+          e->SendScintilla(Editor::SCI_AUTOCCANCEL);
+          hint->setFont(e->lexer()->defaultFont());
           hint->setText(suggestion);
           hint->adjustSize();
           hint->move(
@@ -149,6 +159,8 @@ class Inline : public QObject {
 
 protected:
   bool eventFilter(QObject *, QEvent *event) override {
+    if (event->type() == QEvent::FocusIn && eligible())
+      delay.start();
     if (event->type() == QEvent::FocusOut)
       clear();
     if (event->type() == QEvent::KeyPress && !suggestion.isEmpty()) {
@@ -172,16 +184,16 @@ public:
       : QObject(editor), e(editor), client(models),
         hint(new QLabel(editor->viewport())) {
     hint->setTextFormat(Qt::PlainText);
-    hint->setStyleSheet("color:#81858c;background:transparent;");
+    hint->setStyleSheet("color:#616b72;background:transparent;");
     hint->setAttribute(Qt::WA_TransparentForMouseEvents);
     hint->setFont(e->font());
     hint->hide();
     delay.setSingleShot(true);
-    delay.setInterval(950);
+    delay.setInterval(650);
     connect(&delay, &QTimer::timeout, this, [this] { request(); });
     auto changed = [this] {
       clear();
-      if (!url.isEmpty())
+      if (eligible())
         delay.start();
     };
     connect(e, &Editor::textChanged, this, changed);
@@ -192,28 +204,10 @@ public:
             [this] { clear(); });
     e->installEventFilter(this);
   }
-  void toggle() {
+  void refresh() {
     clear();
-    if (!url.isEmpty()) {
-      url.clear();
-      return;
-    }
-    if (!validUrl(QUrl(endpoint())) || model().isEmpty()) {
-      QMessageBox::information(e, "AI 行内续写",
-                               "请先在「AI 代码建议」设置模型并生成一次。");
-      return;
-    }
-    if (QMessageBox::question(e, "为此标签启用行内续写？",
-                              "暂停输入后，将发送光标前最多 4096 个字符到 " +
-                                  endpoint() + "。\nTab 接受，Esc 忽略。",
-                              QMessageBox::Yes | QMessageBox::Cancel,
-                              QMessageBox::Cancel) == QMessageBox::Yes) {
-      url = endpoint();
-      e->setFocus();
-      delay.start();
-    }
+    if (eligible()) delay.start();
   }
-  bool enabled() const { return !url.isEmpty(); }
 };
 
 void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
@@ -229,7 +223,7 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
   d.setWindowTitle(next ? "建议下一处修改" : "AI 代码建议");
   d.resize(680, 600);
   auto box = new QVBoxLayout(&d);
-  box->setContentsMargins(16, 16, 16, 12);
+  box->setContentsMargins(20, 16, 20, 16);
   box->setSpacing(12);
   QTabWidget pages;
   pages.setObjectName("assistantPages");
@@ -254,17 +248,21 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
   form->addRow("API Key（仅本次运行）", &key);
   form->setContentsMargins(16, 16, 16, 16);
   form->setVerticalSpacing(12);
+  form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
   context.setFont(Appearance::codeFont());
   review.setFont(Appearance::codeFont());
   auto layout = new QVBoxLayout(&prompt);
   layout->setContentsMargins(16, 16, 16, 16);
   layout->setSpacing(8);
   auto *instructionLabel = new QLabel("指令");
+  instructionLabel->setProperty("section", true);
   instructionLabel->setBuddy(&instruction);
   layout->addWidget(instructionLabel);
   layout->addWidget(&instruction);
   auto *contextRow = new QHBoxLayout;
   auto *contextLabel = new QLabel("代码上下文");
+  contextLabel->setProperty("section", true);
   contextLabel->setBuddy(&context);
   contextRow->addWidget(contextLabel);
   contextRow->addStretch();
@@ -309,7 +307,19 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
   pages.addTab(&prompt, "编写指令");
   pages.addTab(&review, "审阅建议");
   pages.addTab(&config, "模型设置");
-  box->addWidget(&pages);
+  pages.tabBar()->hide();
+  auto *sections = new QListWidget;
+  sections->setAccessibleName("AI 建议步骤");
+  sections->setObjectName("assistantSections");
+  sections->setFixedWidth(108);
+  for (int i = 0; i < pages.count(); ++i) sections->addItem(pages.tabText(i));
+  sections->setCurrentRow(pages.currentIndex());
+  QObject::connect(sections, &QListWidget::currentRowChanged, &pages, &QTabWidget::setCurrentIndex);
+  QObject::connect(&pages, &QTabWidget::currentChanged, sections, [sections](int index) { sections->setCurrentRow(index); });
+  auto *workArea = new QHBoxLayout;
+  workArea->addWidget(sections);
+  workArea->addWidget(&pages, 1);
+  box->addLayout(workArea, 1);
   QLabel notice("生成时会将指令和上方代码发送到所选服务。");
   notice.setProperty("secondary", true);
   notice.setTextFormat(Qt::PlainText);
@@ -338,29 +348,38 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
     apply->setEnabled(false);
   });
   QObject::connect(e, &QObject::destroyed, &d, &QDialog::reject);
-  QObject::connect(send, &QPushButton::clicked, &d, [&] {
+  auto saveModel = [&] {
     auto url = address.text().trimmed();
     if (!validUrl(QUrl(url, QUrl::StrictMode)) ||
         engine.text().trimmed().isEmpty()) {
       pages.setCurrentWidget(&config);
       notice.setText("请填写完整 HTTPS 接口路径（本机可用 HTTP）及模型名称。");
-      return;
+      return false;
     }
     if (key.text().trimmed().contains(QRegularExpression("[^!-~]"))) {
       pages.setCurrentWidget(&config);
       notice.setText("API Key 含无效字符。");
-      return;
+      return false;
     }
+    QSettings settings;
+    settings.setValue("ai/endpoint", url);
+    settings.setValue("ai/model", engine.text().trimmed());
+    client->keys[url] = key.text().trimmed();
+    return true;
+  };
+  auto *saveSettings = new QPushButton("保存模型设置");
+  form->addRow(QString(), saveSettings);
+  QObject::connect(saveSettings, &QPushButton::clicked, &d, [&] {
+    if (saveModel()) notice.setText("模型设置已保存");
+  });
+  QObject::connect(send, &QPushButton::clicked, &d, [&] {
+    if (!saveModel()) return;
     if (instruction.text().trimmed().isEmpty() ||
         context.toPlainText().toUtf8().size() > 32768) {
       pages.setCurrentWidget(&prompt);
       notice.setText("请填写指令，并将上下文缩小至 32 KiB 以内。");
       return;
     }
-    QSettings settings;
-    settings.setValue("ai/endpoint", url);
-    settings.setValue("ai/model", engine.text().trimmed());
-    client->keys[url] = key.text().trimmed();
     send->setEnabled(false);
     apply->setEnabled(false);
     notice.setText("正在生成…");
@@ -443,7 +462,7 @@ void installCodeTools(QMainWindow *window, QTabWidget *tabs,
   auto composeAction = menu->addAction("AI 代码建议…");
   composeAction->setShortcut(QKeySequence("Ctrl+Alt+I"));
   auto next = menu->addAction("建议下一处修改…");
-  auto toggle = menu->addAction("为当前标签启用行内续写");
+  auto toggle = menu->addAction("输入时显示 AI 灰字补全");
   toggle->setCheckable(true);
   auto controllers = std::make_shared<QHash<Editor *, Inline *>>();
   auto editor = [tabs] {
@@ -454,22 +473,39 @@ void installCodeTools(QMainWindow *window, QTabWidget *tabs,
       if (auto e = editor(); e && !e->isReadOnly())
         compose(e, tabs, client, action == next);
     });
-  QObject::connect(toggle, &QAction::triggered, menu, [=] {
-    if (auto e = editor(); e && !e->isReadOnly()) {
-      if (!controllers->contains(e)) {
-        controllers->insert(e, new Inline(e, client));
-        QObject::connect(e, &QObject::destroyed, menu,
-                         [controllers, e] { controllers->remove(e); });
+  auto attach = [=] {
+    auto *e = editor();
+    if (!e || controllers->contains(e) || QSettings().value("ai/inlineEndpoint").toString().isEmpty())
+      return;
+    controllers->insert(e, new Inline(e, client));
+    QObject::connect(e, &QObject::destroyed, menu, [controllers, e] { controllers->remove(e); });
+  };
+  QObject::connect(tabs, &QTabWidget::currentChanged, menu, [attach](int) { attach(); });
+  attach();
+  QObject::connect(toggle, &QAction::triggered, menu, [=](bool enable) {
+    if (enable) {
+      if (!validUrl(QUrl(endpoint())) || model().isEmpty()) {
+        QMessageBox::information(window, "AI 灰字补全", "请先在 AI 代码建议的“模型设置”页保存接口与模型名称。");
+        toggle->setChecked(false);
+        return;
       }
-      controllers->value(e)->toggle();
-      toggle->setChecked(controllers->value(e)->enabled());
+      if (QMessageBox::question(window, "启用 AI 灰字补全？",
+          "在代码或配置文件中暂停输入后，将自动发送光标前最多 4096 个字符到 " +
+          endpoint() + "。设置适用于之后打开的代码标签。Tab 接受，Esc 忽略。",
+          QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
+        toggle->setChecked(false);
+        return;
+      }
     }
+    QSettings().setValue("ai/inlineEndpoint", enable ? endpoint() : QString());
+    attach();
+    if (auto *e = editor()) e->setFocus();
+    for (auto *controller : *controllers) controller->refresh();
   });
   QObject::connect(menu, &QMenu::aboutToShow, menu, [=] {
     auto e = editor();
-    for (auto a : {composeAction, next, toggle})
+    for (auto a : {composeAction, next})
       a->setEnabled(e && !e->isReadOnly());
-    toggle->setChecked(controllers->contains(e) &&
-                       controllers->value(e)->enabled());
+    toggle->setChecked(!endpoint().isEmpty() && QSettings().value("ai/inlineEndpoint").toString() == endpoint());
   });
 }

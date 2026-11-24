@@ -55,7 +55,7 @@ class NumberedLogPage final : public QPlainTextEdit {
     QPainter p(target);
     p.setFont(font());
     p.fillRect(target->rect(), QColor("#f2f4f4"));
-    p.setPen(QColor("#cdd3d5"));
+    p.setPen(QColor("#e3e1da"));
     p.drawLine(target->width() - 1, 0, target->width() - 1, target->height());
     for (auto b = firstVisibleBlock(); b.isValid(); b = b.next()) {
       auto y = blockBoundingGeometry(b).translated(contentOffset()).top();
@@ -63,7 +63,7 @@ class NumberedLogPage final : public QPlainTextEdit {
         break;
       if (!b.isVisible())
         continue;
-      p.setPen(QColor("#536269"));
+      p.setPen(QColor("#52524d"));
       p.drawText(QRectF(2, y, target->width() - 10, fontMetrics().height()),
                  Qt::AlignRight | Qt::AlignVCenter,
                  first > 0 ? QString::number(first + b.blockNumber())

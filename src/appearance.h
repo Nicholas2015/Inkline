@@ -13,7 +13,7 @@ inline QFont codeFont() {
   f.setPointSize(11);
   return f;
 }
-enum class Symbol { New, Open, Save, Search, Suggest, Lock };
+enum class Symbol { New, Open, Save, Search, Suggest, Lock, Recent };
 inline QIcon icon(Symbol id) {
   QIcon result;
   for (int scale : {1, 2, 3}) {
@@ -35,6 +35,10 @@ inline QIcon icon(Symbol id) {
     case Symbol::Open:
       line({{1.5, 12}, {1.5, 3}, {6, 3}, {8, 5}, {13, 5}});
       line({{1.5, 13}, {4.5, 7}, {15, 7}, {12.5, 13}, {1.5, 13}});
+      break;
+    case Symbol::Recent:
+      p.drawEllipse(QRectF(2, 2, 12, 12));
+      line({{8, 4.5}, {8, 8}, {10.5, 9.5}});
       break;
     case Symbol::Save:
       line({{2, 2}, {11, 2}, {14, 5}, {14, 14}, {2, 14}, {2, 2}});
@@ -97,16 +101,16 @@ inline void apply(QApplication &app) {
   ui.setPointSize(10);
   app.setFont(ui);
   auto palette = app.style()->standardPalette();
-  for (auto [role, hex] : {std::pair{QPalette::Window, "#f6f6f5"},
-                           {QPalette::WindowText, "#292d30"},
+  for (auto [role, hex] : {std::pair{QPalette::Window, "#f6f5f2"},
+                           {QPalette::WindowText, "#282825"},
                            {QPalette::Base, "#ffffff"},
-                           {QPalette::AlternateBase, "#f7f8f7"},
-                           {QPalette::Text, "#292d30"},
+                           {QPalette::AlternateBase, "#faf9f6"},
+                           {QPalette::Text, "#282825"},
                            {QPalette::Button, "#f5f5f4"},
                            {QPalette::ButtonText, "#353a3c"},
-                           {QPalette::Highlight, "#475862"},
+                           {QPalette::Highlight, "#363632"},
                            {QPalette::HighlightedText, "#ffffff"},
-                           {QPalette::PlaceholderText, "#70777b"}})
+                           {QPalette::PlaceholderText, "#626d74"}})
     palette.setColor(role, QColor(hex));
   palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor("#85898c"));
   app.setPalette(palette);

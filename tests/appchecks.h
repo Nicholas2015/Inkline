@@ -40,11 +40,28 @@ static int verifyInstall(const QString &output) {
       require(QDir().mkpath(snapshot+".drafts"),"legacyFixtureDirectory");
       put(snapshot+".drafts/"+draftId,QString("旧版未保存的草稿").toUtf8());
       QJsonObject tab{{"path",""},{"dirty",true},{"codec","UTF-8"},{"draftId",draftId}};
-      put(snapshot,QJsonDocument(QJsonObject{{"version",1},{"active",0},{"tabs",QJsonArray{tab}}}).toJson());
+      put(snapshot,QJsonDocument(QJsonObject{{"project",temp.path()},{"version",1},{"active",0},{"tabs",QJsonArray{tab}}}).toJson());
       Window restored;
       restored.startSession(legacyDir);
       auto *tabs=restored.findChild<QTabWidget*>();
       auto *editor=tabs?dynamic_cast<Edit*>(tabs->currentWidget()):nullptr;
+      auto *tree = restored.findChild<QTreeView *>("workspaceTree");
+      auto *model = tree ? qobject_cast<QFileSystemModel *>(tree->model()) : nullptr;
+      require(model && QFileInfo(model->filePath(tree->rootIndex())) == QFileInfo(temp.path()), "workspaceRoot");
+      const QString nested = legacyDir + "/nested.ini";
+      put(nested, "enabled=true");
+      auto fileIndex = model->index(nested);
+      require(fileIndex.isValid(), "workspaceNestedFile");
+      tree->activated(fileIndex);
+      tree->activated(fileIndex);
+      require(tabs->count() == 2 && tabs->currentWidget()->property("filePath").toString() == nested,
+              "workspaceOpenAndReuseTab");
+      tabs->setCurrentIndex(0);
+      require(!tree->currentIndex().isValid(), "workspaceDraftClearsSelection");
+      tree->collapseAll();
+      tabs->setCurrentIndex(1);
+      require(tree->currentIndex() == fileIndex && tree->isExpanded(fileIndex.parent()),
+              "workspaceTabRevealsFile");
       require(editor && editor->dirty() && editor->text()=="旧版未保存的草稿","legacyDraft");
       require(restored.windowTitle().contains("墨行 Inkline"),"renamedWindow");
     }
@@ -109,6 +126,32 @@ static int verifyInstall(const QString &output) {
       w.open(log, true);
       require(dynamic_cast<Log *>(tabs->currentWidget()) != nullptr, "openLog");
       require(!qApp->windowIcon().pixmap(32).isNull(), "applicationIcon");
+    }
+    {
+      Window w;
+      auto *tabs = w.findChild<QTabWidget *>();
+      auto verifyTokens = [&](QString suffix, QByteArray content, int key, int value) {
+        auto path = temp.filePath("colors." + suffix);
+        put(path, content);
+        w.open(path);
+        auto *editor = dynamic_cast<Edit *>(tabs->currentWidget());
+        require(editor && editor->lexer(), suffix + "Lexer");
+        editor->SendScintilla(Edit::SCI_COLOURISE, 0UL, -1);
+        const int keyStyle = editor->SendScintilla(Edit::SCI_GETSTYLEAT, key);
+        const int valueStyle = editor->SendScintilla(Edit::SCI_GETSTYLEAT, value);
+        require(keyStyle != valueStyle && editor->lexer()->color(keyStyle) != editor->lexer()->color(valueStyle),
+                suffix + "KeyAndValueHighlight");
+      };
+      for (const auto &ext : {"c", "cpp", "java"}) verifyTokens(ext, "int x = 123;", 1, 9);
+      verifyTokens("py", "def run(): return 1", 1, 5);
+      verifyTokens("GO", "package main", 1, 9);
+      verifyTokens("rs", "fn main() {}", 1, 5);
+      verifyTokens("zig", "pub fn run() void {}", 1, 8);
+      verifyTokens("toml", "port = 8080", 1, 8);
+      verifyTokens("conf", "listen 8080;", 1, 8);
+      verifyTokens("properties", "server.port=8080", 1, 13);
+      verifyTokens("YML", "port: 8080", 1, 7);
+      verifyTokens("json", R"({"port":8080})", 2, 9);
     }
     result.insert("passed", true);
   } catch (const std::exception &e) {

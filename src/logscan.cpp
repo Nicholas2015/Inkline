@@ -1,4 +1,5 @@
 #include "logscan.h"
+#include "logfields.h"
 #include "document.h"
 #include <QDateTime>
 #include <QFile>
@@ -233,6 +234,8 @@ void visitLineStarts(QFile &f, qint64 pos, qint64 size, Visitor visit) {
 QJsonObject execute(const QJsonObject &j) {
   const auto path = j["path"].toString(), kind = j["kind"].toString(),
              query = j["query"].toString();
+  const bool session = j["session"].toBool();
+  const auto pattern = session ? sessionPattern(QRegularExpression::escape(query)) : query;
   const auto codec = j["codec"].toString().toLatin1();
   auto start = j["start"].toInteger(), size = j["size"].toInteger();
   QFile f(path);
@@ -274,6 +277,19 @@ QJsonObject execute(const QJsonObject &j) {
     result["offset"] = pos;
     return result;
   }
+  const int first = j["fromSecond"].toInt(-1), last = j["toSecond"].toInt(-1);
+  auto inTimeRange = [&](qint64 begin) {
+    if (first < 0)
+      return true;
+    static const QRegularExpression clock(
+        QStringLiteral(R"(^\s*\[?(?:\d{4}[-/]\d{2}[-/]\d{2}[ T])?(\d{2}:\d{2}:\d{2})(?!\d))"));
+    auto prefix = readAt(f, begin, qMin<qint64>(64, size - begin));
+    auto match = clock.match(QString::fromUtf8(prefix));
+    auto time = QTime::fromString(match.captured(1), "HH:mm:ss");
+    int sec = time.msecsSinceStartOfDay() / 1000;
+    return time.isValid() && (first <= last ? sec >= first && sec <= last
+                                            : sec >= first || sec <= last);
+  };
   QJsonArray hits;
   qint64 more = -1, resume = size;
   if (kind == "marks") {
@@ -311,8 +327,10 @@ QJsonObject execute(const QJsonObject &j) {
     QQueue<qint64> previous;
     qint64 written = 0, count = 0;
     visitLogRecords(
-        path, size, 0, codec, query, j["regex"].toBool(), j["case"].toBool(),
+        path, size, 0, codec, pattern, session || j["regex"].toBool(), j["case"].toBool(),
         [&](qint64 begin, qint64 end, qint64 hit, qsizetype, const QString &) {
+          if (hit >= 0 && !inTimeRange(begin))
+            hit = -1;
           if (hit >= 0 || after > 0) {
             auto first =
                 (hit >= 0 && !previous.isEmpty()) ? previous.head() : begin;
@@ -336,13 +354,13 @@ QJsonObject execute(const QJsonObject &j) {
   }
   int limit = qBound(1, j["limit"].toInt(200), 200);
   if (j["filter"].toBool()) {
-    visitLogRecords(path, size, start, codec, query, j["regex"].toBool(),
+    visitLogRecords(path, size, start, codec, pattern, session || j["regex"].toBool(),
                     j["case"].toBool(),
                     [&](qint64 begin, qint64 end, qint64 hit, qsizetype len,
                         const QString &preview) {
                       if (end == size && readAt(f, size - 1, 1) != "\n")
                         resume = begin;
-                      if (hit >= 0)
+                      if (hit >= 0 && inTimeRange(begin))
                         hits.append(QJsonArray{hit, qint64(len), preview});
                       if (hits.size() < limit)
                         return true;
