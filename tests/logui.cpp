@@ -1,3 +1,5 @@
+#include "numberedlogpage.h"
+#include "logstyle.h"
 #include "logscan.h"
 #include "logview.h"
 #include <QApplication>
@@ -149,6 +151,23 @@ int main(int argc, char **argv) {
   QTest::qWait(100);
   if (list->count())
     return 10;
+  auto *numbered=dynamic_cast<NumberedLogPage*>(page);
+  if(!numbered)return 20;
+  w.gotoByte(row.size()*15942);
+  if(!wait([&]{return numbered->firstFileLine()==15943;}))return 21;
+  auto *wrap=w.findChild<QCheckBox*>("logWrap");
+  if(!wrap)return 24;
+  wrap->setChecked(true);
+  if(numbered->firstFileLine()!=15943 || numbered->lineWrapMode()!=QPlainTextEdit::WidgetWidth)return 25;
+  QFile styled(tmp.filePath("styled.log"));
+  if(!styled.open(QIODevice::WriteOnly))return 22;
+  styled.write("2026-11-24 16:13:18 | sidecar | WARN | server.auth:event:162 | id=22\r\n");styled.close();
+  Log formatted(styled.fileName());formatted.setHighlightWords({"WARN"});
+  auto *styledPage=formatted.findChild<QPlainTextEdit*>("logPage");
+  auto block=styledPage->document()->firstBlock();auto index=block.text().indexOf("WARN");bool combined=false;
+  for(const auto &fmt:block.layout()->formats())
+    if(fmt.start==index && fmt.length==4 && fmt.format.foreground().color()==LogStyle::ink(LogStyle::Warn) && fmt.format.background().color()==LogStyle::keywordColors[0])combined=true;
+  if(!combined)return 23;
   puts("Native log UI navigation, following, search, continuation, selection "
        "and cancellation passed.");
 }

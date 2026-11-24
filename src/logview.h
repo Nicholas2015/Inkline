@@ -11,6 +11,7 @@ public:
   QJsonObject saveView() const;
   void restoreView(const QJsonObject &state);
   void showSearch();
+  void setHighlightWords(const QStringList &words);
   void jumpDialog();
   void gotoLine(qint64 line);
   void gotoSearchHit(qint64 offset, const QString &codec, int matchLength);

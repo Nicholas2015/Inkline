@@ -315,6 +315,7 @@ class Window final : public QMainWindow {
       auto name = e->doc.path.isEmpty() ? QString("未命名")
                                         : QFileInfo(e->doc.path).fileName();
       tabs->setTabText(tabs->currentIndex(), name + (e->dirty() ? " *" : ""));
+      tabs->setTabToolTip(tabs->currentIndex(), QDir::toNativeSeparators(e->doc.path));
     }
     for (auto *b : {codecButton, eolButton, languageButton})
       b->setVisible(e);
@@ -325,7 +326,7 @@ class Window final : public QMainWindow {
                          : e->eolMode() == Edit::EolWindows ? "CRLF"
                                                             : "CR");
       languageButton->setText(e->lexer()
-                                  ? QString::fromLatin1(e->lexer()->language())
+                                  ? QString::fromUtf8(e->lexer()->language())
                                   : QString("纯文本"));
       int line, col;
       e->getCursorPosition(&line, &col);
@@ -442,6 +443,8 @@ public:
             [this] { QTimer::singleShot(0, this, [this] { inspectDisk(); }); });
     setCentralWidget(tabs);
     tabs->setDocumentMode(true);
+    tabs->tabBar()->setObjectName("documentStrip");
+    tabs->tabBar()->setElideMode(Qt::ElideMiddle);
     tabs->setTabsClosable(true);
     auto *f = menuBar()->addMenu("文件(&F)");
     f->addAction("新建", QKeySequence::New, this, [this] { addEdit({}); });
@@ -574,6 +577,7 @@ public:
         spacing->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         bar->addWidget(spacing);
         bar->addAction(a);
+        bar->widgetForAction(a)->setObjectName("assistantCommand");
         break;
       }
     connect(tabs, &QTabWidget::currentChanged, this, [this] {
@@ -614,7 +618,8 @@ public:
           connect(v->verticalScrollBar(), &QScrollBar::valueChanged, this,
                   [this] { changed(); });
         }
-        tabs->addTab(tab, QFileInfo(path).fileName() + " · 只读");
+        int index = tabs->addTab(tab, Appearance::icon(Appearance::Symbol::Lock), QFileInfo(path).fileName());
+        tabs->setTabToolTip(index, QString("只读日志  ·  %1").arg(QDir::toNativeSeparators(absolute)));
         tabs->setCurrentWidget(tab);
       } else {
         try {

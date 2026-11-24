@@ -100,6 +100,12 @@ static int verifyInstall(const QString &output) {
       w.open(config, true); // Already-open editor keeps focus.
       auto log = temp.filePath("test.log");
       put(log, "INFO ok\nERROR failed\n");
+      w.open(log);
+      auto *logEditor=dynamic_cast<Edit*>(tabs->currentWidget());
+      require(logEditor && dynamic_cast<LogLexer*>(logEditor->lexer()),"editableLogLexer");
+      logEditor->SendScintilla(Edit::SCI_COLOURISE,0,-1);
+      require(logEditor->SendScintilla(Edit::SCI_GETSTYLEAT,0UL)==LogStyle::Info &&
+              logEditor->SendScintilla(Edit::SCI_GETSTYLEAT,8UL)==LogStyle::Error,"severityStyles");
       w.open(log, true);
       require(dynamic_cast<Log *>(tabs->currentWidget()) != nullptr, "openLog");
       require(!qApp->windowIcon().pixmap(32).isNull(), "applicationIcon");

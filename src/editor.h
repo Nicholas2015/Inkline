@@ -1,3 +1,5 @@
+#include "columnheader.h"
+#include "loglexer.h"
 #pragma once
 #include "appearance.h"
 #include "document.h"
@@ -53,6 +55,7 @@ template <class Lexer> QsciLexer *createLexer(QObject *parent) {
 }
 inline const QList<EditorLanguage> &editorLanguages() {
   static const QList<EditorLanguage> languages = {
+      {"日志", {"log", "trace"}, createLexer<LogLexer>},
       {"Python", {"py", "pyw"}, createLexer<QsciLexerPython>},
       {"C / C++",
        {"cpp", "c", "h", "cc", "cxx", "hpp", "hh", "ino"},
@@ -76,6 +79,31 @@ inline const QList<EditorLanguage> &editorLanguages() {
   return languages;
 }
 class Edit final : public QsciScintilla {
+  ColumnHeader header{this};
+  QFrame divider{this};
+  void layoutColumns() {
+    const auto digits = QString::number(lines()).size();
+    int numberWidth =
+        qMax(48, fontMetrics().horizontalAdvance('9') * int(digits) + 16);
+    if (marginWidth(0) != numberWidth)
+      setMarginWidth(0, numberWidth);
+    int left = numberWidth + marginWidth(1);
+    auto h = header.sizeHint().height();
+    if (viewportMargins().top() != h)
+      setViewportMargins(0, h, 0, 0);
+    header.columns(left, dynamic_cast<LogLexer *>(lexer()) ? "日志内容"
+                         : lexer()                         ? "代码"
+                                                           : "文本");
+    divider.setGeometry(left - 1, viewport()->y(), 1, viewport()->height());
+    divider.raise();
+  }
+
+protected:
+  void resizeEvent(QResizeEvent *event) override {
+    QsciScintilla::resizeEvent(event);
+    layoutColumns();
+  }
+
 public:
   Document doc;
   bool formatDirty = false;
@@ -84,13 +112,17 @@ public:
   explicit Edit(Document document) : doc(std::move(document)) {
     setUtf8(true);
     setFrameShape(QFrame::NoFrame);
+    SendScintilla(SCI_SETMARGINLEFT, 0UL, 6L);
     setScrollWidth(1);
     setScrollWidthTracking(true);
     setExtraAscent(2);
     setExtraDescent(2);
     applyLanguage();
     setMarginLineNumbers(0, true);
-    setMarginWidth(0, "00000");
+    divider.setStyleSheet("background:#cdd3d5;");
+    divider.setAttribute(Qt::WA_TransparentForMouseEvents);
+    connect(this, &QsciScintilla::linesChanged, this,
+            [this] { layoutColumns(); });
     setAutoIndent(true);
     setIndentationsUseTabs(false);
     setTabWidth(4);
@@ -105,8 +137,13 @@ public:
   }
   void applyLanguage() {
     setProperty("filePath", doc.path);
-    const auto ext =
+    auto ext =
         language.isEmpty() ? QFileInfo(doc.path).suffix().toLower() : language;
+    if (language.isEmpty() &&
+        QFileInfo(doc.path).fileName().contains(
+            QRegularExpression(R"(\.(?:log|trace)(?:\.\d+)+$)",
+                               QRegularExpression::CaseInsensitiveOption)))
+      ext = "log";
     QsciLexer *style = nullptr;
     for (const auto &item : editorLanguages())
       if (item.extensions.contains(ext)) {
@@ -121,7 +158,7 @@ public:
       for (int i = 0; i < 128; ++i)
         if (!style->description(i).isEmpty()) {
           auto c = style->defaultColor(i);
-          if (c.hslSaturation() > 25)
+          if (!dynamic_cast<LogLexer *>(style) && c.hslSaturation() > 25)
             style->setColor(QColor::fromHsl(c.hslHue(),
                                             qMin(76, c.hslSaturation()),
                                             qBound(77, c.lightness(), 98)),
@@ -147,7 +184,14 @@ public:
       style->setFont(font);
     else
       setFont(font);
+    if (auto *log = dynamic_cast<LogLexer *>(style)) {
+      QFont strong = font;
+      strong.setWeight(QFont::DemiBold);
+      for (int level : {LogStyle::Info, LogStyle::Warn, LogStyle::Error})
+        log->setFont(strong, level);
+    }
     setMarginsFont(font);
+    layoutColumns();
     setMarginsBackgroundColor(QColor("#f5f6f5"));
     setMarginsForegroundColor(QColor("#687174"));
     setCaretLineBackgroundColor(QColor("#f4f6f6"));

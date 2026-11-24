@@ -13,7 +13,7 @@ inline QFont codeFont() {
   f.setPointSize(11);
   return f;
 }
-enum class Symbol { New, Open, Save, Search, Suggest };
+enum class Symbol { New, Open, Save, Search, Suggest, Lock };
 inline QIcon icon(Symbol id) {
   QIcon result;
   for (int scale : {1, 2, 3}) {
@@ -44,6 +44,11 @@ inline QIcon icon(Symbol id) {
     case Symbol::Search:
       p.drawEllipse(QRectF(2, 2, 8.5, 8.5));
       line({{9.5, 9.5}, {14, 14}});
+      break;
+    case Symbol::Lock:
+      p.drawRoundedRect(QRectF(3.5,7,9,7),1.5,1.5);
+      p.drawArc(QRectF(5,2,6,8),0,180*16);
+      line({{5,6},{5,7}});line({{11,6},{11,7}});
       break;
     case Symbol::Suggest:
       line({{3, 6}, {1, 8}, {3, 10}});

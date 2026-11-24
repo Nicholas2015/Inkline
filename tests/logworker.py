@@ -50,6 +50,10 @@ def main():
         assert index["anchors"] == list(range(0, 24001, 2048))
         cached = run("line", line=12001, anchor=index["anchors"][12000 // 1024])
         assert cached == {"offset": 24000}
+        source.write_bytes(b"a"* (128*1024-1) + b"\r\nb\rc\nd")
+        assert run("line",line=2)["offset"] == 128*1024+1
+        assert run("line",line=3)["offset"] == 128*1024+3
+        assert run("line",line=4)["offset"] == 128*1024+5
         print("Native log worker regression tests passed.")
 
 if __name__ == "__main__":

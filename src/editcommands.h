@@ -65,37 +65,6 @@ inline void lineOperation(Edit *e, int op) {
   if (result != original)
     e->replaceSelectedText(result);
 }
-inline const std::array<QColor, 5> keywordColors = {
-    QColor("#FFE1A1"), QColor("#B8DEFF"), QColor("#E3CCF4"), QColor("#BFE8C8"),
-    QColor("#FFCDCA")};
-
-class LogKeywordHighlighter final : public QSyntaxHighlighter {
-public:
-  explicit LogKeywordHighlighter(QTextDocument *document)
-      : QSyntaxHighlighter(document) {}
-  void setWords(const QStringList &updated) {
-    words = updated;
-    rehighlight();
-  }
-
-protected:
-  void highlightBlock(const QString &text) override {
-    for (qsizetype i = 0; i < words.size(); ++i) {
-      const QString &word = words[i];
-      QTextCharFormat format;
-      format.setBackground(keywordColors[i % keywordColors.size()]);
-      qsizetype offset = 0;
-      while ((offset = text.indexOf(word, offset)) >= 0) {
-        setFormat(offset, word.size(), format);
-        offset += word.size();
-      }
-    }
-  }
-
-private:
-  QStringList words;
-};
-
 inline void highlightKeywords(QWidget *tab) {
   auto *editor = dynamic_cast<Edit *>(tab);
   auto *log = dynamic_cast<Log *>(tab);
@@ -111,32 +80,22 @@ inline void highlightKeywords(QWidget *tab) {
   words.removeDuplicates();
   tab->setProperty("highlightWords", words);
   if (log) {
-    auto *view = log->findChild<QPlainTextEdit *>("logPage");
-    if (!view)
-      return;
-    auto *document = view->document();
-    auto *layer = dynamic_cast<LogKeywordHighlighter *>(
-        document->findChild<QSyntaxHighlighter *>("keywordLayer"));
-    if (!layer) {
-      layer = new LogKeywordHighlighter(document);
-      layer->setObjectName("keywordLayer");
-    }
-    layer->setWords(words);
+    log->setHighlightWords(words);
     return;
   }
   const auto bytes = editor->text().toUtf8();
   constexpr int firstIndicator = 12;
-  for (size_t i = 0; i < keywordColors.size(); ++i) {
+  for (size_t i = 0; i < LogStyle::keywordColors.size(); ++i) {
     const int id = firstIndicator + int(i);
     editor->indicatorDefine(Edit::StraightBoxIndicator, id);
-    editor->setIndicatorForegroundColor(keywordColors[i], id);
+    editor->setIndicatorForegroundColor(LogStyle::keywordColors[i], id);
     editor->SendScintilla(Edit::SCI_SETINDICATORCURRENT, id);
     editor->SendScintilla(Edit::SCI_INDICATORCLEARRANGE, 0, bytes.size());
   }
   for (qsizetype i = 0; i < words.size(); ++i) {
     const auto word = words[i].toUtf8();
     editor->SendScintilla(Edit::SCI_SETINDICATORCURRENT,
-                          int(firstIndicator + i % keywordColors.size()));
+                          int(firstIndicator + i % LogStyle::keywordColors.size()));
     qsizetype offset = 0;
     while ((offset = bytes.indexOf(word, offset)) >= 0) {
       editor->SendScintilla(Edit::SCI_INDICATORFILLRANGE, offset, word.size());

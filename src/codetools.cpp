@@ -232,6 +232,8 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
   box->setContentsMargins(16, 16, 16, 12);
   box->setSpacing(12);
   QTabWidget pages;
+  pages.setObjectName("assistantPages");
+  pages.tabBar()->setObjectName("assistantNav");
   QWidget prompt, config;
   QPlainTextEdit review, context;
   QLineEdit instruction(next ? "找出下一处值得修改的地方，返回 JSON "
@@ -257,10 +259,14 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
   auto layout = new QVBoxLayout(&prompt);
   layout->setContentsMargins(16, 16, 16, 16);
   layout->setSpacing(8);
-  layout->addWidget(new QLabel("指令"));
+  auto *instructionLabel = new QLabel("指令");
+  instructionLabel->setBuddy(&instruction);
+  layout->addWidget(instructionLabel);
   layout->addWidget(&instruction);
   auto *contextRow = new QHBoxLayout;
-  contextRow->addWidget(new QLabel("将发送的代码上下文"));
+  auto *contextLabel = new QLabel("代码上下文");
+  contextLabel->setBuddy(&context);
+  contextRow->addWidget(contextLabel);
   contextRow->addStretch();
   layout->addLayout(contextRow);
   layout->addWidget(&context, 1);
@@ -276,6 +282,7 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
   } else
     context.setPlainText(contextBefore(e, 4096));
   QPushButton attach("附加标签页…");
+  attach.setProperty("quiet", true);
   if (!next)
     contextRow->addWidget(&attach);
   QObject::connect(&attach, &QPushButton::clicked, &d, [&] {
@@ -313,6 +320,14 @@ void compose(Editor *e, QTabWidget *tabs, ModelClient *client, bool next) {
   send->setProperty("primary", true);
   auto apply = buttons.addButton("应用建议", QDialogButtonBox::ActionRole);
   apply->setEnabled(false);
+  QObject::connect(&pages, &QTabWidget::currentChanged, &buttons, [send, apply, &pages, &review](int) {
+    for (auto *button : {send, apply}) {
+      button->setProperty("primary", (pages.currentWidget() == &review) == (button == apply));
+      button->style()->unpolish(button);
+      button->style()->polish(button);
+      button->update();
+    }
+  });
   buttons.addButton(QDialogButtonBox::Close)->setText("关闭");
   box->addWidget(&buttons);
   QObject::connect(&buttons, &QDialogButtonBox::rejected, &d, &QDialog::reject);

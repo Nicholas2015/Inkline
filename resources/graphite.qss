@@ -4,7 +4,7 @@ QMenuBar::item { background: transparent; padding: 4px 8px; }
 QMenu { background: white; border: 1px solid #c8ccce; padding: 4px; }
 QMenu::item { padding: 5px 24px; border-radius: 3px; }
 QMenuBar::item:selected, QMenu::item:selected { color: #25292c; background: #e4e6e6; }
-QToolBar { background: #f6f6f5; border: 0; padding: 4px 8px; spacing: 4px; }
+QToolBar { background: #fafaf9; border: 0; border-bottom: 1px solid #dedfdd; padding: 4px 8px; spacing: 4px; }
 QToolBar::separator { background: #d3d6d7; width: 1px; margin: 6px 4px; }
 QToolButton { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 3px 6px; }
 QToolBar QToolButton { padding: 4px 8px; }
@@ -15,6 +15,13 @@ QTabBar { background: #ebedec; }
 QTabBar::tab { color: #52585b; background: transparent; border: 0; border-top: 2px solid transparent; padding: 6px 12px 8px; }
 QTabBar::tab:hover { background: #f2f3f2; }
 QTabBar::tab:selected { color: #232729; background: white; border-top-color: #444d51; }
+QTabBar#documentStrip { background: #eaecea; }
+QTabBar#documentStrip::tab { padding: 5px 10px 6px; margin: 4px 1px 0; border: 1px solid transparent; border-bottom: 0; border-top-left-radius: 5px; border-top-right-radius: 5px; }
+QTabBar#documentStrip::tab:selected { background: white; border-color: #d2d6d4; border-top: 2px solid #485450; padding-top: 4px; }
+QTabBar#documentStrip::tab:!selected:hover { background: #f3f4f2; }
+QToolButton#assistantCommand { background: white; border: 1px solid #d0d4d2; border-radius: 5px; padding: 3px 10px; }
+QToolButton#assistantCommand:hover { background: #ecedeb; }
+QToolButton#assistantCommand:focus { border-color: #546773; }
 QStatusBar { color: #52595c; background: #f6f6f5; border-top: 1px solid #dcdede; padding: 0 6px; }
 QStatusBar::item { border: 0; }
 QStatusBar QToolButton { padding: 2px 8px; }
@@ -37,6 +44,13 @@ QHeaderView::section { background: #eff0ef; color: #505659; padding: 4px 8px; bo
 QListWidget::item, QTreeWidget::item { padding: 3px 4px; }
 QCheckBox { spacing: 6px; }
 QLabel#logPosition, QLabel[secondary="true"] { color: #5d6467; }
+QPushButton[quiet="true"] { background: transparent; border-color: transparent; color: #485153; }
+QPushButton[quiet="true"]:hover { background: #e8ebe9; }
+QPushButton[quiet="true"]:focus { border-color: #536b78; }
+QTabBar#assistantNav { background: transparent; }
+QTabBar#assistantNav::tab { border: 0; border-bottom: 2px solid transparent; padding: 6px 12px; }
+QTabBar#assistantNav::tab:selected { background: transparent; border-bottom-color: #414d49; }
+QTabWidget#assistantPages::pane { background: white; border: 1px solid #d5d8d6; border-radius: 5px; }
 QDialog QTabWidget::pane { background: white; border: 1px solid #d3d6d6; }
 QScrollBar:vertical { background: #f5f6f5; width: 12px; margin: 0; }
 QScrollBar:horizontal { background: #f5f6f5; height: 12px; margin: 0; }

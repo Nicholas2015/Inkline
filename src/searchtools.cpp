@@ -183,7 +183,7 @@ class Find : public QDialog {
 public:
   Find(QMainWindow *window, QTabWidget *t) : QDialog(window), tabs(t) {
     setWindowTitle("查找和替换");
-    setMinimumWidth(456);
+    setMinimumWidth(488);
     auto *v = new QVBoxLayout(this);
     auto *h = new QHBoxLayout;
     v->setContentsMargins(16, 16, 16, 12);
@@ -197,7 +197,9 @@ public:
     h->addWidget(mode);
     v->addLayout(h);
     replacement->setPlaceholderText("替换为");
-    v->addWidget(replacement);
+    auto *replaceRow = new QHBoxLayout;
+    replaceRow->addWidget(replacement,1);
+    v->addLayout(replaceRow);
     h = new QHBoxLayout;
     for (auto *c : {sensitive, whole, regex, scope})
       h->addWidget(c);
@@ -211,16 +213,14 @@ public:
       connect(b, &QPushButton::clicked, this, [this, op] { run(op); });
       return b;
     };
-    button("上一处", "prev");
-    button("下一处", "next")->setProperty("primary", true);
-    button("计数", "count");
+    auto *actions = h;
+    h = replaceRow;
     auto *one = button("替换", "replace"), *all = button("全部替换", "all");
     for (QWidget *w : QList<QWidget *>{one, all, replacement}) {
       w->hide();
       connect(mode, &QCheckBox::toggled, w, &QWidget::setVisible);
     }
-    v->addLayout(h);
-    h = new QHBoxLayout;
+    h = actions;
     auto *list = new QToolButton;
     list->setText("查找全部");
     list->setPopupMode(QToolButton::MenuButtonPopup);
@@ -230,13 +230,18 @@ public:
     scopes->addAction("当前文档", this, [this] { run("list"); });
     scopes->addAction("所有编辑标签", this, [this] { run("tabs"); });
     h->addWidget(list);
+    button("计数", "count")->setProperty("quiet", true);
     h->addStretch();
+    button("上一处", "prev");
+    button("下一处", "next")->setProperty("primary", true);
+    v->addLayout(h);
+    h = new QHBoxLayout;
+    h->addWidget(status,1);
     cancel->setAutoDefault(false);
     cancel->setEnabled(false);
     h->addWidget(cancel);
     v->addLayout(h);
     status->setProperty("secondary", true);
-    v->addWidget(status);
     v->addWidget(results);
     results->hide();
     connect(cancel, &QPushButton::clicked, this, [this] {

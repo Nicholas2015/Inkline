@@ -120,7 +120,10 @@ qint64 logAlignedStart(const QString &path, qint64 offset,
   offset = qBound<qint64>(0, offset, f.size());
   auto begin = qMax<qint64>(0, offset - 4096);
   auto prefix = readAt(f, begin, offset - begin);
-  auto nl = prefix.lastIndexOf('\n');
+  // Do not treat the position between CR and LF as the following record.
+  if (prefix.endsWith('\r') && offset < f.size() && f.peek(1) == "\n")
+    prefix.chop(1);
+  auto nl = qMax(prefix.lastIndexOf('\n'), prefix.lastIndexOf('\r'));
   if (nl >= 0)
     return begin + nl + 1;
   if (!begin)
@@ -208,6 +211,25 @@ void visitLogRecords(const QString &path, qint64 size, qint64 start,
 }
 
 namespace {
+// Visit byte offsets immediately after complete file line endings.
+template <class Visitor>
+void visitLineStarts(QFile &f, qint64 pos, qint64 size, Visitor visit) {
+  while (pos < size) {
+    auto data = readAt(f, pos, qMin(chunkSize, size - pos));
+    if (data.endsWith('\r') && pos + data.size() < size && f.peek(1) == "\n")
+      data += f.read(1);
+    for (qsizetype i = 0; i < data.size(); ++i) {
+      if (data[i] == '\r') {
+        if (i + 1 < data.size() && data[i + 1] == '\n')
+          ++i;
+      } else if (data[i] != '\n')
+        continue;
+      if (!visit(pos + i + 1))
+        return;
+    }
+    pos += data.size();
+  }
+}
 QJsonObject execute(const QJsonObject &j) {
   const auto path = j["path"].toString(), kind = j["kind"].toString(),
              query = j["query"].toString();
@@ -227,18 +249,14 @@ QJsonObject execute(const QJsonObject &j) {
       pos = j["anchor"].toInteger();
       remaining = (line - 1) % 1024;
     } else {
-      qint64 lines = 1, offset = 0;
+      qint64 lines = 1;
       QJsonArray anchors{0};
-      while (offset < size) {
-        const auto data = readAt(f, offset, qMin(chunkSize, size - offset));
-        qsizetype i = -1;
-        while ((i = data.indexOf('\n', i + 1)) >= 0) {
-          ++lines;
-          if ((lines - 1) % 1024 == 0)
-            anchors.append(offset + i + 1);
-        }
-        offset += data.size();
-      }
+      visitLineStarts(f, 0, size, [&](qint64 offset) {
+        ++lines;
+        if ((lines - 1) % 1024 == 0)
+          anchors.append(offset);
+        return true;
+      });
       if (line > lines)
         fail(QString("请输入 1 至 %1 的行号").arg(lines));
       result["anchors"] = anchors;
@@ -246,13 +264,11 @@ QJsonObject execute(const QJsonObject &j) {
       pos = anchors[(line - 1) / 1024].toInteger();
       remaining = (line - 1) % 1024;
     }
-    while (remaining && pos < size) {
-      auto data = readAt(f, pos, qMin(chunkSize, size - pos));
-      qsizetype i = -1;
-      while (remaining && (i = data.indexOf('\n', i + 1)) >= 0)
-        --remaining;
-      pos += remaining ? data.size() : i + 1;
-    }
+    if (remaining)
+      visitLineStarts(f, pos, size, [&](qint64 offset) {
+        pos = offset;
+        return --remaining > 0;
+      });
     if (remaining)
       fail("日志已变化，请重新定位");
     result["offset"] = pos;

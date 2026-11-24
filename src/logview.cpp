@@ -1,3 +1,5 @@
+#include "numberedlogpage.h"
+#include "logstyle.h"
 #include "logview.h"
 #include "appearance.h"
 #include "document.h"
@@ -67,7 +69,8 @@ QPushButton *button(QBoxLayout *row, const QString &text) {
 struct Log::State {
   Log *owner;
   QString path;
-  QPlainTextEdit *view = new QPlainTextEdit;
+  NumberedLogPage *view = new NumberedLogPage;
+  LogStyle::Layer *highlight=new LogStyle::Layer(view->document());
   QComboBox *codec = new QComboBox;
   QLabel *position = new QLabel;
   QPushButton *more = nullptr, *go = nullptr, *stop = nullptr;
@@ -108,7 +111,7 @@ struct Log::State {
       raw = bytes;
       start = offset;
       end = start + bytes.size();
-      view->setPlainText(displayText(decode(bytes, encoding(), false)));
+      view->setPage(path,offset,bytes,displayText(decode(bytes,encoding(),false)));
       if (bottom)
         view->moveCursor(QTextCursor::End);
       auto size = QFileInfo(path).size();
@@ -562,6 +565,8 @@ Log::Log(const QString &file) : d(std::make_unique<State>(this, file)) {
   s.dialog->setWindowTitle("日志检索 — " + QFileInfo(s.path).fileName());
   s.dialog->resize(700, 420);
   auto *panel = new QVBoxLayout(s.dialog);
+  panel->setContentsMargins(16,16,16,12);
+  panel->setSpacing(8);
   auto *row = new QHBoxLayout;
   panel->addLayout(row);
   s.mode->addItems({"查找文字", "筛选匹配行"});
@@ -572,8 +577,9 @@ Log::Log(const QString &file) : d(std::make_unique<State>(this, file)) {
   s.terms->lineEdit()->setMaxLength(4096);
   row->addWidget(s.mode);
   row->addWidget(s.terms, 1);
-  row->addWidget(s.regex);
-  row->addWidget(s.sensitive);
+  auto *filters = new QHBoxLayout;
+  filters->addWidget(s.regex);filters->addWidget(s.sensitive);filters->addStretch();
+  panel->addLayout(filters);
   s.sensitive->setChecked(true);
   s.go = button(row, "查找");
   s.go->setProperty("primary", true);
@@ -707,6 +713,7 @@ void Log::restoreView(const QJsonObject &state) {
   d->view->horizontalScrollBar()->setValue(state["horizontal"].toInt());
   d->follow->setChecked(state["follow"].toBool());
 }
+void Log::setHighlightWords(const QStringList &words){d->highlight->setWords(words);}
 void Log::showSearch() {
   d->dialog->show();
   d->dialog->raise();
@@ -745,7 +752,7 @@ void Log::gotoLine(qint64 line) {
   }
   d->follow->setChecked(false);
   d->notice(cached ? "正在定位行号…" : "正在建立行号索引…");
-  d->launch(req, [this, size, modified, birth](QJsonObject r) {
+  d->launch(req, [this, line, size, modified, birth](QJsonObject r) {
     QFileInfo fresh(d->path);
     if (fresh.size() != size || fresh.lastModified() != modified ||
         fresh.birthTime() != birth) {
@@ -763,7 +770,7 @@ void Log::gotoLine(qint64 line) {
       d->indexedBirth = birth;
       d->indexedLines = r["lines"].toInteger();
     }
-    gotoByte(r["offset"].toInteger());
+    const auto at=r["offset"].toInteger();gotoByte(at);d->view->confirmFirstLine(at,line);
   });
 }
 void Log::jumpDialog() {
